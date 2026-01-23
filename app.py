@@ -66,38 +66,59 @@ NOTION_PROPS = {
 def parse_email(payload):
     """
     Extract email components from Mailhook payload.
-    Replicates Modules 44-47, 50 regex parsing.
+    Handles Make.com's mailhook format directly.
     """
-    text = payload.get('text', '')
-    headers = payload.get('headers', {})
+    # Handle if payload is wrapped in an array
+    if isinstance(payload, list) and len(payload) > 0:
+        payload = payload[0]
     
-    # Module 44: Extract original sender from forwarded email
+    text = payload.get('text', '') or ''
+    headers = payload.get('headers', {}) or {}
+    from_data = payload.get('from', {}) or {}
+    
+    # Get sender - either from 'from' object or parse from text
+    if isinstance(from_data, dict):
+        direct_sender = from_data.get('address', '')
+    elif isinstance(from_data, str):
+        direct_sender = from_data
+    else:
+        direct_sender = ''
+    
+    # Try to extract original sender from forwarded email body
     sender_match = re.search(r'From:\s*(?:[^<]*<)?([^>@\s]+@[^>\s]+)', text)
-    original_sender = sender_match.group(1) if sender_match else payload.get('from', {}).get('address', '')
+    original_sender = sender_match.group(1) if sender_match else direct_sender
     
-    # Module 45: Extract sent date
-    sent_match = re.search(r'Sent:\s*(.+?)(?=\n)', text)
-    received_at = sent_match.group(1).strip() if sent_match else payload.get('date', '')
+    # Get date
+    received_at = payload.get('date', '')
     
-    # Module 46: Extract subject from forwarded content
-    subject_match = re.search(r'Subject:\s*(.+?)(?=\n)', text)
-    subject = subject_match.group(1).strip() if subject_match else payload.get('subject', '')
+    # Get subject
+    subject = payload.get('subject', '')
     
-    # Module 47: Extract user notes (content before signature)
-    notes_match = re.search(r'^(.*?)(?=\n\nSteven E\. Mach)', text, re.DOTALL)
+    # Extract user notes (content before signature)
+    notes_match = re.search(r'^(.*?)(?=\n\nSteven E\. Mach|\n\n_{10,}|\n\n-{10,})', text, re.DOTALL)
     user_notes = notes_match.group(1).strip() if notes_match else ''
     
-    # Module 50: Extract email body (content after subject line)
-    body_match = re.search(r'Subject:.*?\n\n([\s\S]+?)(?=\n\nFrom:\s|$)', text)
-    body = body_match.group(1).strip() if body_match else text
+    # Use full text as body
+    body = text
     
     # Get message ID from headers (for fingerprint)
-    message_id = headers.get('in-reply-to', headers.get('message-id', ''))
+    # Make.com sends headers as a dict with various keys
+    message_id = ''
+    if isinstance(headers, dict):
+        message_id = headers.get('in-reply-to', '') or headers.get('message-id', '') or ''
+        # If message-id is a string, use it directly
+        if isinstance(message_id, str):
+            message_id = message_id.strip('<>').strip()
     
     # Check for attachments
-    attachments = payload.get('attachments', [])
+    attachments = payload.get('attachments', []) or []
     has_attachment = len(attachments) > 0
-    attachment_names = [a.get('fileName', 'unknown') for a in attachments]
+    attachment_names = []
+    for a in attachments:
+        if isinstance(a, dict):
+            attachment_names.append(a.get('fileName', a.get('filename', 'unknown')))
+        elif isinstance(a, str):
+            attachment_names.append(a)
     
     return {
         'message_id': message_id,
@@ -600,12 +621,22 @@ def webhook():
     Replicates entire Flow 1 logic.
     """
     try:
-        # Get payload (handle both single email and array)
-        payload = request.json
-        if isinstance(payload, list):
-            payload = payload[0]  # Take first email if array
+        # Get payload - handle various formats
+        if request.is_json:
+            payload = request.json
+        else:
+            # Try to parse as JSON anyway
+            try:
+                payload = json.loads(request.data.decode('utf-8'))
+            except:
+                payload = request.form.to_dict()
         
-        logger.info(f"Received email: {payload.get('subject', 'No subject')}")
+        # Handle if payload is wrapped in an array
+        if isinstance(payload, list) and len(payload) > 0:
+            payload = payload[0]
+        
+        logger.info(f"Received webhook payload type: {type(payload)}")
+        logger.info(f"Received email subject: {payload.get('subject', 'No subject')}")
         
         # Step 1: Parse email
         email_data = parse_email(payload)

@@ -503,7 +503,7 @@ def determine_status(task, matter_id, has_attachment):
     elif force_review:
         return "Needs Review"
     elif not matter_id:
-        return "Needs Matter"
+        return "Needs Review"  # No matter linked - needs manual review
     elif confidence >= 0.8:
         return "Proposed"
     else:

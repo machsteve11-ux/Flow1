@@ -42,6 +42,7 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 # Notion Database IDs
 TASKS_DATABASE_ID = "2aee43055e06803dbf90d54231711e61"
 CASES_DATABASE_ID = "2aee43055e0681ad8e43e6e67825f9dd"
+CALENDAR_DATABASE_ID = "2cbe43055e06806d88bafb4b136061b5"
 
 # Notion Property IDs (from your Make.com blueprint)
 NOTION_PROPS = {
@@ -477,6 +478,84 @@ def search_case_by_index(index_number):
         return None
 
 
+def extract_first_plaintiff(caption):
+    """
+    Extract the first plaintiff's last name or company name from a case caption.
+    Examples:
+        "Johnson v. State Farm" -> "Johnson"
+        "Martinez v. ABC Corp" -> "Martinez"
+        "ABC Corp v. Smith" -> "ABC Corp"
+    """
+    if not caption:
+        return None
+    
+    # Split on common "v." or "vs." or "vs" patterns
+    match = re.split(r'\s+v\.?\s+|\s+vs\.?\s+', caption, maxsplit=1, flags=re.IGNORECASE)
+    if match and len(match) >= 1:
+        first_party = match[0].strip()
+        # Clean up any leading/trailing punctuation
+        first_party = re.sub(r'^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$', '', first_party)
+        return first_party if first_party else None
+    return None
+
+
+def create_stub_matter(index_number, caption, venue=None):
+    """
+    Create a stub matter in Legal Cases database when no match is found.
+    Returns the new matter's Notion page ID.
+    """
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # Extract first plaintiff for Case Name
+    case_name = extract_first_plaintiff(caption) or caption or "Unknown Matter"
+    
+    properties = {
+        "Case Name": {
+            "title": [{"text": {"content": case_name}}]
+        },
+        "Index_number": {
+            "rich_text": [{"text": {"content": index_number or ""}}]
+        },
+        "Title": {
+            "rich_text": [{"text": {"content": caption or ""}}]
+        },
+        "Status": {
+            "select": {"name": "Pending"}
+        },
+        "Date Opened": {
+            "date": {"start": datetime.now().strftime('%Y-%m-%d')}
+        }
+    }
+    
+    # Add venue if extracted
+    if venue:
+        properties["Venue"] = {
+            "rich_text": [{"text": {"content": venue}}]
+        }
+    
+    data = {
+        "parent": {"database_id": CASES_DATABASE_ID},
+        "properties": properties
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created stub matter: {case_name} (Index: {index_number})")
+        return result['id']
+    except Exception as e:
+        logger.error(f"Failed to create stub matter: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None
+
+
 def determine_status(task, matter_id, has_attachment):
     """
     Determine task status based on confidence, due date, and matter match.
@@ -610,6 +689,71 @@ def create_notion_task(task, email_data, fingerprint, matter_id, status):
         return None
 
 
+def create_notion_calendar_item(event, email_data, fingerprint, matter_id, status):
+    """
+    Create calendar item in Notion Calendar Items (Proposed) database.
+    """
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # Build properties object
+    properties = {
+        "Title": {
+            "title": [{"text": {"content": event.get('title', {}).get('value', 'Untitled Event')}}]
+        },
+        "Status": {
+            "status": {"name": status}
+        },
+    }
+    
+    # Add event date if present
+    event_date = event.get('event_date', {}).get('value')
+    event_time = event.get('event_time', {}).get('value')
+    if event_date:
+        date_value = {"start": event_date}
+        if event_time:
+            date_value["start"] = f"{event_date}T{event_time}:00"
+        properties["Event Date"] = {"date": date_value}
+    
+    # Add event type if we can determine it
+    title_lower = event.get('title', {}).get('value', '').lower()
+    if 'deposition' in title_lower or 'ebt' in title_lower:
+        properties["Event_type"] = {"select": {"name": "Deposition"}}
+    elif 'conference' in title_lower:
+        properties["Event_type"] = {"select": {"name": "Compliance Conference"}}
+    elif 'hearing' in title_lower:
+        properties["Event_type"] = {"select": {"name": "Hearing"}}
+    elif 'trial' in title_lower:
+        properties["Event_type"] = {"select": {"name": "Trial"}}
+    
+    # Add case relation if found
+    if matter_id:
+        properties["Case"] = {
+            "relation": [{"id": matter_id}]
+        }
+    
+    data = {
+        "parent": {"database_id": CALENDAR_DATABASE_ID},
+        "properties": properties
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created Notion calendar item: {event.get('title', {}).get('value', 'Untitled')}")
+        return result['id']
+    except Exception as e:
+        logger.error(f"Failed to create Notion calendar item: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None
+
+
 # =============================================================================
 # MAIN WEBHOOK ENDPOINT
 # =============================================================================
@@ -668,17 +812,25 @@ def webhook():
         logger.info("Extracting tasks with Claude...")
         extraction = extract_tasks_with_claude(email_data)
         
-        # Step 6: Get index number for matter matching
+        # Step 6: Get index number and caption for matter matching
         index_number = extraction.get('index_number', {}).get('value')
+        caption = extraction.get('caption', {}).get('value')
         
-        # Step 7: Search for matching matter
+        # Step 7: Search for matching matter, create stub if not found
         matter_id = None
+        stub_created = False
         if index_number:
             matter_id = search_case_by_index(index_number)
             if matter_id:
                 logger.info(f"Found matching matter: {matter_id}")
             else:
                 logger.info(f"No matter found for index: {index_number}")
+                # Create stub matter if we have caption
+                if caption:
+                    matter_id = create_stub_matter(index_number, caption)
+                    if matter_id:
+                        stub_created = True
+                        logger.info(f"Created stub matter: {matter_id}")
         
         # Step 8: Create tasks in Notion
         created_tasks = []
@@ -701,24 +853,14 @@ def webhook():
                     notion_id
                 )
         
-        # Step 9: Handle calendar items (create as tasks for now)
+        # Step 9: Handle calendar items (create in Calendar Items database)
         for event in extraction.get('calendar_items', []):
-            # Convert calendar item to task format
-            task = {
-                "title": {"value": f"[CALENDAR] {event.get('title', {}).get('value', 'Event')}", "confidence": event.get('title', {}).get('confidence', 0.8)},
-                "due_date": {"value": event.get('event_date', {}).get('value'), "confidence": 0.9},
-                "relative_deadline": {"value": None, "confidence": 1.0},
-                "priority": {"value": "P1", "confidence": 0.9},
-                "extraction_rationale": event.get('extraction_rationale', ''),
-                "applicable_rule": None,
-                "subtasks": []
-            }
-            status = determine_status(task, matter_id, email_data['has_attachment'])
-            notion_id = create_notion_task(task, email_data, fingerprint, matter_id, status)
+            status = "Proposed" if matter_id else "Needs Review"
+            notion_id = create_notion_calendar_item(event, email_data, fingerprint, matter_id, status)
             
             if notion_id:
                 created_tasks.append({
-                    "title": task.get('title', {}).get('value'),
+                    "title": event.get('title', {}).get('value'),
                     "notion_id": notion_id,
                     "status": status,
                     "type": "calendar"
@@ -731,7 +873,9 @@ def webhook():
             "fingerprint": fingerprint,
             "tasks_created": len(created_tasks),
             "tasks": created_tasks,
-            "has_attachment": email_data['has_attachment']
+            "has_attachment": email_data['has_attachment'],
+            "matter_id": matter_id,
+            "stub_created": stub_created
         })
         
     except Exception as e:

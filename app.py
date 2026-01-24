@@ -38,11 +38,14 @@ NOTION_API_KEY = os.environ.get('NOTION_API_KEY')
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
+TODOIST_API_KEY = os.environ.get('TODOIST_API_KEY')
 
 # Notion Database IDs
 TASKS_DATABASE_ID = "2aee43055e06803dbf90d54231711e61"
 CASES_DATABASE_ID = "2aee43055e0681ad8e43e6e67825f9dd"
 CALENDAR_DATABASE_ID = "2cbe43055e06806d88bafb4b136061b5"
+MAPPINGS_DATABASE_ID = "2aee43055e06802782abfee92f846d88"
+MATTER_ACTIVITY_DATABASE_ID = "2aee43055e06800fb4860009681c5fe"  # Will need to verify this ID
 
 # Notion Property IDs (from your Make.com blueprint)
 NOTION_PROPS = {
@@ -755,6 +758,421 @@ def create_notion_calendar_item(event, email_data, fingerprint, matter_id, statu
 
 
 # =============================================================================
+# FLOW 2: PROMOTION TO TODOIST
+# =============================================================================
+
+def compute_promotion_key(notion_page_id, title, due_date, todoist_project_id):
+    """
+    Compute unique promotion key for idempotency.
+    Combines: Notion page ID + normalized title + due date + Todoist project ID
+    """
+    # Normalize title
+    normalized_title = title.lower().strip() if title else ""
+    normalized_title = re.sub(r'\s+', ' ', normalized_title)
+    
+    # Build key components
+    components = [
+        notion_page_id or "",
+        normalized_title,
+        due_date or "",
+        todoist_project_id or ""
+    ]
+    
+    key_input = "|".join(components)
+    return hashlib.sha256(key_input.encode()).hexdigest()
+
+
+def check_promotion_exists(promotion_key):
+    """
+    Check if this promotion_key already exists in task_events.
+    Returns True if already promoted (idempotency check).
+    """
+    url = f"{SUPABASE_URL}/rest/v1/task_events"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    params = {
+        "promotion_key": f"eq.{promotion_key}",
+        "event_type": "eq.Promoted",
+        "limit": 1
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        results = response.json()
+        return len(results) > 0
+    except Exception as e:
+        logger.error(f"Promotion check failed: {e}")
+        return False  # Proceed if check fails (will create duplicate, but better than losing task)
+
+
+def get_todoist_project_for_matter(matter_id):
+    """
+    Query Mappings database to find Todoist project ID for a matter.
+    Returns default project if no mapping found.
+    """
+    if not matter_id:
+        return None, None  # Will use Todoist inbox
+    
+    url = "https://api.notion.com/v1/databases/" + MAPPINGS_DATABASE_ID + "/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # Query for mapping with this matter
+    data = {
+        "filter": {
+            "property": "Case",
+            "relation": {
+                "contains": matter_id
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            mapping = results[0]
+            props = mapping.get('properties', {})
+            
+            # Extract Todoist project ID from the mapping
+            # Assuming there's a "Todoist_project_id" property (text or number)
+            project_prop = props.get('Todoist_project_id', {})
+            if project_prop.get('type') == 'rich_text':
+                texts = project_prop.get('rich_text', [])
+                if texts:
+                    return texts[0].get('plain_text'), mapping.get('id')
+            elif project_prop.get('type') == 'number':
+                return str(int(project_prop.get('number', 0))), mapping.get('id')
+        
+        return None, None
+        
+    except Exception as e:
+        logger.error(f"Mappings lookup failed: {e}")
+        return None, None
+
+
+def create_todoist_task(title, due_date, priority, project_id, description=None):
+    """
+    Create task in Todoist via REST API.
+    Returns Todoist task ID on success.
+    """
+    url = "https://api.todoist.com/rest/v2/tasks"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Map priority: Notion P0-P3 to Todoist 4-1 (Todoist 4 is highest)
+    priority_map = {"P0": 4, "P1": 3, "P2": 2, "P3": 1}
+    todoist_priority = priority_map.get(priority, 2)
+    
+    data = {
+        "content": title,
+        "priority": todoist_priority
+    }
+    
+    if due_date:
+        data["due_date"] = due_date
+    
+    if project_id:
+        data["project_id"] = project_id
+    
+    if description:
+        data["description"] = description
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created Todoist task: {result.get('id')} - {title}")
+        return result.get('id'), result.get('url')
+    except Exception as e:
+        logger.error(f"Todoist task creation failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None, None
+
+
+def update_notion_task_with_todoist(notion_page_id, todoist_task_id, status="Approved"):
+    """
+    Update Notion task with Todoist task ID after promotion.
+    """
+    url = f"https://api.notion.com/v1/pages/{notion_page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    data = {
+        "properties": {
+            "Todoist Task ID": {
+                "rich_text": [{"text": {"content": str(todoist_task_id)}}]
+            },
+            "Status": {
+                "status": {"name": status}
+            }
+        }
+    }
+    
+    try:
+        response = requests.patch(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Updated Notion task {notion_page_id} with Todoist ID {todoist_task_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update Notion task: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return False
+
+
+def log_promotion_event(notion_page_id, task_title, todoist_task_id, promotion_key):
+    """
+    Log promotion to Supabase audit trail.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/task_events"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    data = {
+        "notion_row_id": notion_page_id,
+        "event_type": "Promoted",
+        "ts": datetime.utcnow().isoformat(),
+        "actor": "System",
+        "details_json": json.dumps({
+            "task_title": task_title,
+            "todoist_task_id": todoist_task_id
+        }),
+        "promotion_key": promotion_key
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Logged promotion event for {notion_page_id}")
+    except Exception as e:
+        logger.error(f"Failed to log promotion event: {e}")
+
+
+def create_matter_activity(matter_id, activity_type, description, related_task_id=None, source="System"):
+    """
+    Create Matter Activity entry in Notion.
+    """
+    if not matter_id:
+        logger.warning("No matter_id provided for activity logging")
+        return None
+    
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": description}}]
+        },
+        "Type": {
+            "select": {"name": activity_type}
+        },
+        "Source": {
+            "select": {"name": source}
+        },
+        "Case": {
+            "relation": [{"id": matter_id}]
+        }
+    }
+    
+    if related_task_id:
+        properties["Related Task"] = {
+            "relation": [{"id": related_task_id}]
+        }
+    
+    data = {
+        "parent": {"database_id": MATTER_ACTIVITY_DATABASE_ID},
+        "properties": properties
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created Matter Activity: {description}")
+        return result.get('id')
+    except Exception as e:
+        logger.error(f"Failed to create Matter Activity: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None
+
+
+# =============================================================================
+# FLOW 3: COMPLETION SYNC
+# =============================================================================
+
+def find_notion_task_by_todoist_id(todoist_task_id):
+    """
+    Search Tasks (Proposed) database for task with matching Todoist Task ID.
+    """
+    url = f"https://api.notion.com/v1/databases/{TASKS_DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    data = {
+        "filter": {
+            "property": "Todoist Task ID",
+            "rich_text": {
+                "equals": str(todoist_task_id)
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            task = results[0]
+            props = task.get('properties', {})
+            
+            # Extract task details
+            title_prop = props.get('Name', {}) or props.get('Title', {})
+            title = ""
+            if title_prop.get('title'):
+                title = title_prop['title'][0]['plain_text'] if title_prop['title'] else ""
+            
+            # Get matter relation
+            matter_prop = props.get('Matter', {})
+            matter_id = None
+            if matter_prop.get('relation'):
+                relations = matter_prop['relation']
+                if relations:
+                    matter_id = relations[0].get('id')
+            
+            return {
+                "id": task.get('id'),
+                "title": title,
+                "matter_id": matter_id
+            }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Notion task search failed: {e}")
+        return None
+
+
+def mark_notion_task_completed(notion_page_id):
+    """
+    Update Notion task with completed_at timestamp and status.
+    """
+    url = f"https://api.notion.com/v1/pages/{notion_page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    data = {
+        "properties": {
+            "Status": {
+                "status": {"name": "Completed"}
+            },
+            "Completed At": {
+                "date": {"start": datetime.utcnow().isoformat()}
+            }
+        }
+    }
+    
+    try:
+        response = requests.patch(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Marked Notion task {notion_page_id} as completed")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to mark task completed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return False
+
+
+def log_completion_event(notion_page_id, task_title, todoist_task_id):
+    """
+    Log completion to Supabase audit trail.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/task_events"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    data = {
+        "notion_row_id": notion_page_id,
+        "event_type": "Completed",
+        "ts": datetime.utcnow().isoformat(),
+        "actor": "Todoist",
+        "details_json": json.dumps({
+            "task_title": task_title,
+            "todoist_task_id": todoist_task_id
+        })
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Logged completion event for {notion_page_id}")
+    except Exception as e:
+        logger.error(f"Failed to log completion event: {e}")
+
+
+def log_orphan_completion(todoist_task_id, task_content):
+    """
+    Log completion of a task that wasn't found in Notion (orphan).
+    """
+    url = f"{SUPABASE_URL}/rest/v1/task_events"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    data = {
+        "event_type": "CompletedOrphan",
+        "ts": datetime.utcnow().isoformat(),
+        "actor": "Todoist",
+        "details_json": json.dumps({
+            "todoist_task_id": todoist_task_id,
+            "task_content": task_content
+        })
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        logger.info(f"Logged orphan completion for Todoist task {todoist_task_id}")
+    except Exception as e:
+        logger.error(f"Failed to log orphan completion: {e}")
+
+
+# =============================================================================
 # MAIN WEBHOOK ENDPOINT
 # =============================================================================
 
@@ -889,14 +1307,254 @@ def health():
     return jsonify({"status": "healthy", "service": "anais-intake"})
 
 
+# =============================================================================
+# FLOW 2: PROMOTION WEBHOOK ENDPOINT
+# =============================================================================
+
+@app.route('/promotion-webhook', methods=['POST'])
+def promotion_webhook():
+    """
+    Flow 2: Promotion to Todoist
+    Triggered by Notion automation when task status changes to "Approved"
+    
+    Expected payload from Notion automation:
+    {
+        "page_id": "notion-page-uuid",
+        "properties": { ... full page properties ... }
+    }
+    
+    Or direct Notion webhook format with full page data.
+    """
+    try:
+        payload = request.json
+        logger.info(f"Promotion webhook received")
+        
+        # Handle Notion automation webhook format
+        # Notion sends the page data in 'data' object
+        if 'data' in payload:
+            page_data = payload['data']
+        else:
+            page_data = payload
+        
+        # Extract page ID
+        notion_page_id = page_data.get('id') or page_data.get('page_id')
+        if not notion_page_id:
+            return jsonify({"status": "error", "message": "No page ID in payload"}), 400
+        
+        logger.info(f"Processing promotion for page: {notion_page_id}")
+        
+        # Extract properties
+        properties = page_data.get('properties', {})
+        
+        # Get task title
+        title_prop = properties.get('Name', {}) or properties.get('Title', {})
+        task_title = ""
+        if title_prop.get('title'):
+            task_title = title_prop['title'][0]['plain_text'] if title_prop['title'] else ""
+        
+        # Get due date
+        due_date_prop = properties.get('Due Date', {}) or properties.get('Due', {})
+        due_date = None
+        if due_date_prop.get('date'):
+            due_date = due_date_prop['date'].get('start')
+        
+        # Get priority
+        priority_prop = properties.get('Priority', {})
+        priority = "P2"  # Default
+        if priority_prop.get('select'):
+            priority = priority_prop['select'].get('name', 'P2')
+        
+        # Get matter relation
+        matter_prop = properties.get('Matter', {})
+        matter_id = None
+        if matter_prop.get('relation'):
+            relations = matter_prop['relation']
+            if relations:
+                matter_id = relations[0].get('id')
+        
+        # Get status to verify it's actually "Approved"
+        status_prop = properties.get('Status', {})
+        status = None
+        if status_prop.get('status'):
+            status = status_prop['status'].get('name')
+        
+        if status != "Approved":
+            logger.info(f"Task status is '{status}', not 'Approved'. Skipping promotion.")
+            return jsonify({"status": "skipped", "reason": f"Status is {status}, not Approved"})
+        
+        # Check if already has Todoist ID (already promoted)
+        todoist_id_prop = properties.get('Todoist Task ID', {})
+        existing_todoist_id = None
+        if todoist_id_prop.get('rich_text'):
+            texts = todoist_id_prop['rich_text']
+            if texts:
+                existing_todoist_id = texts[0].get('plain_text')
+        
+        if existing_todoist_id:
+            logger.info(f"Task already has Todoist ID: {existing_todoist_id}. Skipping.")
+            return jsonify({"status": "skipped", "reason": "Already promoted", "todoist_id": existing_todoist_id})
+        
+        # Get Todoist project for this matter
+        todoist_project_id, mapping_id = get_todoist_project_for_matter(matter_id)
+        logger.info(f"Todoist project for matter {matter_id}: {todoist_project_id}")
+        
+        # Compute promotion key for idempotency
+        promotion_key = compute_promotion_key(notion_page_id, task_title, due_date, todoist_project_id)
+        logger.info(f"Promotion key: {promotion_key[:16]}...")
+        
+        # Check idempotency - has this exact promotion happened before?
+        if check_promotion_exists(promotion_key):
+            logger.info(f"Promotion key already exists. Idempotency check passed - skipping.")
+            return jsonify({"status": "skipped", "reason": "Already promoted (idempotency)"})
+        
+        # Create Todoist task
+        todoist_task_id, todoist_url = create_todoist_task(
+            title=task_title,
+            due_date=due_date,
+            priority=priority,
+            project_id=todoist_project_id,
+            description=f"From Notion: {notion_page_id}"
+        )
+        
+        if not todoist_task_id:
+            logger.error("Failed to create Todoist task")
+            return jsonify({"status": "error", "message": "Todoist task creation failed"}), 500
+        
+        # Update Notion with Todoist task ID
+        update_notion_task_with_todoist(notion_page_id, todoist_task_id)
+        
+        # Log promotion event to audit trail
+        log_promotion_event(notion_page_id, task_title, todoist_task_id, promotion_key)
+        
+        # Create Matter Activity if we have a matter
+        if matter_id:
+            create_matter_activity(
+                matter_id=matter_id,
+                activity_type="Promoted",
+                description=f"Promoted: {task_title}",
+                related_task_id=notion_page_id,
+                source="Todoist"
+            )
+        
+        logger.info(f"Promotion complete: {task_title} → Todoist {todoist_task_id}")
+        
+        return jsonify({
+            "status": "promoted",
+            "notion_page_id": notion_page_id,
+            "todoist_task_id": todoist_task_id,
+            "todoist_url": todoist_url,
+            "promotion_key": promotion_key
+        })
+        
+    except Exception as e:
+        logger.error(f"Promotion webhook failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# =============================================================================
+# FLOW 3: TODOIST COMPLETION WEBHOOK ENDPOINT
+# =============================================================================
+
+@app.route('/todoist-webhook', methods=['POST'])
+def todoist_webhook():
+    """
+    Flow 3: Completion Sync
+    Triggered by Todoist webhook when task is completed.
+    
+    Todoist webhook payload:
+    {
+        "event_name": "item:completed",
+        "user_id": "...",
+        "event_data": {
+            "id": "todoist-task-id",
+            "content": "Task title",
+            "project_id": "...",
+            ...
+        }
+    }
+    """
+    try:
+        payload = request.json
+        logger.info(f"Todoist webhook received: {payload.get('event_name', 'unknown event')}")
+        
+        event_name = payload.get('event_name', '')
+        
+        # Only process completion events
+        if event_name not in ['item:completed', 'item:complete']:
+            logger.info(f"Ignoring event: {event_name}")
+            return jsonify({"status": "ignored", "reason": f"Event {event_name} not handled"})
+        
+        event_data = payload.get('event_data', {})
+        todoist_task_id = str(event_data.get('id', ''))
+        task_content = event_data.get('content', '')
+        
+        if not todoist_task_id:
+            return jsonify({"status": "error", "message": "No task ID in payload"}), 400
+        
+        logger.info(f"Processing completion for Todoist task: {todoist_task_id}")
+        
+        # Find corresponding Notion task
+        notion_task = find_notion_task_by_todoist_id(todoist_task_id)
+        
+        if not notion_task:
+            # Orphan task - completed in Todoist but not found in Notion
+            # This is expected for manually created Todoist tasks
+            logger.info(f"Orphan completion: Todoist task {todoist_task_id} not found in Notion")
+            log_orphan_completion(todoist_task_id, task_content)
+            return jsonify({
+                "status": "orphan",
+                "todoist_task_id": todoist_task_id,
+                "message": "Task not found in Notion - logged as orphan"
+            })
+        
+        notion_page_id = notion_task['id']
+        task_title = notion_task['title']
+        matter_id = notion_task.get('matter_id')
+        
+        # Mark task as completed in Notion
+        success = mark_notion_task_completed(notion_page_id)
+        
+        if not success:
+            logger.error(f"Failed to mark Notion task {notion_page_id} as completed")
+            return jsonify({"status": "error", "message": "Failed to update Notion"}), 500
+        
+        # Log completion event
+        log_completion_event(notion_page_id, task_title, todoist_task_id)
+        
+        # Create Matter Activity if we have a matter
+        if matter_id:
+            create_matter_activity(
+                matter_id=matter_id,
+                activity_type="Completed",
+                description=f"Completed: {task_title}",
+                related_task_id=notion_page_id,
+                source="Todoist"
+            )
+        
+        logger.info(f"Completion sync complete: {task_title}")
+        
+        return jsonify({
+            "status": "completed",
+            "notion_page_id": notion_page_id,
+            "todoist_task_id": todoist_task_id,
+            "task_title": task_title
+        })
+        
+    except Exception as e:
+        logger.error(f"Todoist webhook failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with service info."""
     return jsonify({
-        "service": "Anaïs Email Intake",
-        "version": "1.0.0",
+        "service": "Anaïs Legal Task Automation",
+        "version": "2.0.0",
         "endpoints": {
-            "/webhook": "POST - Email intake webhook",
+            "/webhook": "POST - Flow 1: Email intake",
+            "/promotion-webhook": "POST - Flow 2: Notion → Todoist promotion",
+            "/todoist-webhook": "POST - Flow 3: Todoist completion sync",
             "/health": "GET - Health check"
         }
     })
@@ -904,7 +1562,7 @@ def root():
 
 if __name__ == '__main__':
     # Verify required environment variables
-    required_vars = ['NOTION_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY', 'ANTHROPIC_API_KEY']
+    required_vars = ['NOTION_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY', 'ANTHROPIC_API_KEY', 'TODOIST_API_KEY']
     missing = [v for v in required_vars if not os.environ.get(v)]
     if missing:
         logger.error(f"Missing required environment variables: {missing}")

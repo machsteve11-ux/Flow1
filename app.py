@@ -659,8 +659,9 @@ def log_task_event(fingerprint, task_title, event_type, notion_page_id=None):
         "fingerprint": fingerprint,
         "task_title": task_title,
         "event_type": event_type,
-        "notion_page_id": notion_page_id,
-        "created_at": datetime.utcnow().isoformat()
+        "notion_row_id": notion_page_id,
+        "ts": datetime.utcnow().isoformat(),
+        "actor": "System"
     }
     
     try:
@@ -718,15 +719,16 @@ def store_task_content_fingerprint(content_fingerprint, title, matter_id, notion
         "Prefer": "return=minimal"
     }
     data = {
-        "fingerprint": content_fingerprint,  # Using fingerprint column for content fingerprint
+        "fingerprint": content_fingerprint,
         "task_title": title,
         "event_type": "ContentFingerprint",
-        "notion_page_id": notion_page_id,
+        "notion_row_id": notion_page_id,
+        "ts": datetime.utcnow().isoformat(),
+        "actor": "System",
         "details_json": {
             "matter_id": matter_id,
-            "source": source  # "promotion" or "reverse_sync" or "flow1"
-        },
-        "created_at": datetime.utcnow().isoformat()
+            "source": source
+        }
     }
     
     try:

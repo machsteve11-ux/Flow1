@@ -364,6 +364,68 @@ def find_matter_by_index_number(index_number):
         logger.error(f"Index number lookup failed: {e}")
         return None
 
+
+def find_matter_by_case_name(case_name):
+    """
+    Query Legal Cases database by Case Name (title property).
+    
+    Case name is typically the first plaintiff's last name or company name.
+    E.g., "Smith" from "Smith v. Anderson"
+    
+    Returns matter_id if found, None otherwise.
+    """
+    if not case_name:
+        return None
+    
+    # Normalize case name for comparison
+    case_name_clean = case_name.strip()
+    
+    url = f"https://api.notion.com/v1/databases/{CASES_DATABASE_ID}/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # Query by Case Name (title property) - case insensitive contains
+    data = {
+        "filter": {
+            "property": "Case Name",
+            "title": {
+                "equals": case_name_clean
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            matter_id = results[0].get('id')
+            logger.info(f"Found matter by case name '{case_name_clean}': {matter_id}")
+            return matter_id
+        
+        # Try contains match if exact match fails (handles minor variations)
+        data["filter"]["title"] = {"contains": case_name_clean}
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            matter_id = results[0].get('id')
+            logger.info(f"Found matter by case name (partial) '{case_name_clean}': {matter_id}")
+            return matter_id
+        
+        logger.info(f"No matter found for case name: {case_name_clean}")
+        return None
+            
+    except Exception as e:
+        logger.error(f"Case name lookup failed: {e}")
+        return None
+
+
 def find_matter_for_email(sender_email):
     """
     Find a matter by matching sender's email domain.
@@ -2175,28 +2237,38 @@ def webhook():
         matter_id = None
         stub_created = False
         
-        # Try index number first (most reliable for court documents)
-        if index_number:
+        # Extract case name from caption (e.g., "Smith" from "Smith v. Anderson")
+        case_name = extract_first_plaintiff(caption) if caption else None
+        
+        # Primary match: Try case name first (most common scenario)
+        if case_name:
+            matter_id = find_matter_by_case_name(case_name)
+            if matter_id:
+                logger.info(f"Found matching matter by case name '{case_name}': {matter_id}")
+        
+        # Secondary match: Try index number if case name didn't work
+        if not matter_id and index_number:
             matter_id = find_matter_by_index_number(index_number)
             if not matter_id:
-                matter_id = search_case_by_index(index_number)  # Fallback to existing search
-            
+                matter_id = search_case_by_index(index_number)  # Fallback search
             if matter_id:
-                logger.info(f"Found matching matter by index: {matter_id}")
-            else:
-                logger.info(f"No matter found for index: {index_number}")
-                # Create stub matter if we have caption
-                if caption:
-                    matter_id = create_stub_matter(index_number, caption)
-                    if matter_id:
-                        stub_created = True
-                        logger.info(f"Created stub matter: {matter_id}")
+                logger.info(f"Found matching matter by index '{index_number}': {matter_id}")
         
-        # If no index number, try domain matching
-        if not matter_id:
-            matter_id = find_matter_for_email(email_data['original_sender'])
-            if matter_id:
-                logger.info(f"Found matching matter by sender domain: {matter_id}")
+        # If still no matter found, create stub
+        if not matter_id and (case_name or caption):
+            # Before creating stub, double-check index doesn't exist (dedup)
+            if index_number:
+                existing = find_matter_by_index_number(index_number) or search_case_by_index(index_number)
+                if existing:
+                    matter_id = existing
+                    logger.info(f"Found existing matter by index during stub check: {matter_id}")
+            
+            if not matter_id:
+                # Create stub - index_number may be None, that's OK
+                matter_id = create_stub_matter(index_number, caption)
+                if matter_id:
+                    stub_created = True
+                    logger.info(f"Created stub matter for '{case_name or caption}': {matter_id}")
         
         # =================================================================
         # CREATE NOTION ITEMS

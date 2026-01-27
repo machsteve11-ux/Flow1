@@ -364,6 +364,41 @@ def find_matter_by_index_number(index_number):
         logger.error(f"Index number lookup failed: {e}")
         return None
 
+def find_matter_for_email(sender_email):
+    """
+    Find a matter by matching sender's email domain.
+    
+    This is a fallback when no index number is present in the email.
+    Currently returns None (tasks created without matter link).
+    
+    Future enhancement: Query Legal Cases for matching domain in contacts.
+    
+    Args:
+        sender_email: The sender's email address (e.g., "jsmith@lawfirm.com")
+    
+    Returns:
+        matter_id if found, None otherwise
+    """
+    if not sender_email:
+        return None
+    
+    # Extract domain from email
+    try:
+        domain = sender_email.split('@')[1].lower() if '@' in sender_email else None
+    except (IndexError, AttributeError):
+        domain = None
+    
+    if not domain:
+        logger.info(f"Could not extract domain from sender: {sender_email}")
+        return None
+    
+    logger.info(f"Domain matching not yet implemented for: {domain}")
+    # TODO: Query Legal Cases database for matters with matching domain
+    # This would require adding a "Contact Domains" property to the Cases database
+    
+    return None
+
+
 def parse_email(payload):
     """
     Extract email components from Mailhook payload.

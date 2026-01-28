@@ -3837,18 +3837,61 @@ def debug_completion_sync():
     return jsonify(debug_info)
 
 
+@app.route('/oauth-callback', methods=['GET'])
+def oauth_callback():
+    """
+    OAuth callback endpoint for Todoist app authorization.
+    This is needed to complete the OAuth flow which activates webhooks.
+    """
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    
+    if error:
+        return f"<h1>Authorization Error</h1><p>{error}</p>", 400
+    
+    if code:
+        # OAuth flow completed - webhooks should now be active
+        return """
+        <html>
+        <head><title>Todoist Authorization Complete</title></head>
+        <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+            <h1>✅ Authorization Complete!</h1>
+            <p>Your Todoist app has been authorized. Webhooks should now be active.</p>
+            <p>You can close this window and test by completing a task in Todoist.</p>
+            <p><strong>Code received:</strong> {}</p>
+        </body>
+        </html>
+        """.format(code[:20] + "..." if code else "None")
+    
+    return """
+    <html>
+    <head><title>Todoist OAuth Callback</title></head>
+    <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+        <h1>Todoist OAuth Callback</h1>
+        <p>This endpoint handles OAuth callbacks from Todoist.</p>
+        <p>If you're seeing this, the callback worked but no code was provided.</p>
+    </body>
+    </html>
+    """
+
+
 @app.route('/debug-todoist-webhook-config', methods=['GET'])
 def debug_todoist_webhook_config():
     """Debug: Show Todoist webhook configuration info."""
     return jsonify({
         "webhook_url": "https://flow1-production.up.railway.app/todoist-webhook",
+        "oauth_redirect_url": "https://flow1-production.up.railway.app/oauth-callback",
         "expected_events": ["item:completed", "item:added"],
         "instructions": {
             "1": "Go to https://developer.todoist.com/appconsole.html",
             "2": "Find or create your app",
-            "3": "Under Webhooks, set callback URL to the webhook_url above",
-            "4": "Enable events: item:completed, item:added",
-            "5": "Copy the HMAC secret if verification is needed"
+            "3": "Set OAuth redirect URL to: https://flow1-production.up.railway.app/oauth-callback",
+            "4": "Under Webhooks, set callback URL to the webhook_url above",
+            "5": "Enable events: item:completed, item:added",
+            "6": "Click 'Install for me' to complete OAuth flow (THIS ACTIVATES WEBHOOKS)",
+            "7": "You should be redirected to the oauth-callback page",
+            "8": "Now webhooks will be active!"
         },
         "test_command": "curl -X POST https://flow1-production.up.railway.app/todoist-webhook -H 'Content-Type: application/json' -d '{\"event_name\": \"item:completed\", \"event_data\": {\"id\": \"YOUR_TODOIST_TASK_ID\", \"content\": \"Test task\"}}'"
     })
@@ -4147,4 +4190,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
- 

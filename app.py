@@ -45,6 +45,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 TODOIST_API_KEY = os.environ.get('TODOIST_API_KEY')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+TODOIST_OFFICE_PROJECT_ID = os.environ.get('TODOIST_OFFICE_PROJECT_ID')  # Single "Office" project for all matters
 
 # Configure Gemini
 if GOOGLE_API_KEY:
@@ -1412,6 +1413,288 @@ def create_todoist_project(project_name):
         return None
 
 
+# ============================================================================
+# TODOIST SECTION MANAGEMENT (Sections within Office project)
+# ============================================================================
+
+def list_todoist_sections(project_id):
+    """
+    Get all sections in a Todoist project.
+    Returns list of {id, name} dicts.
+    """
+    url = f"https://api.todoist.com/rest/v2/sections?project_id={project_id}"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}",
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        sections = response.json()
+        return [{"id": str(s.get("id")), "name": s.get("name")} for s in sections]
+    except Exception as e:
+        logger.error(f"Failed to list Todoist sections: {e}")
+        return []
+
+
+def find_todoist_section_by_name(project_id, section_name):
+    """
+    Search Todoist sections by name within a project (case-insensitive).
+    Returns section ID if found, None otherwise.
+    """
+    sections = list_todoist_sections(project_id)
+    normalized_name = section_name.lower().strip()
+    
+    for section in sections:
+        if section.get("name", "").lower().strip() == normalized_name:
+            logger.info(f"Found existing Todoist section: {section['name']} ({section['id']})")
+            return str(section["id"])
+    
+    return None
+
+
+def create_todoist_section(project_id, section_name):
+    """
+    Create a new section in a Todoist project.
+    Returns section ID on success.
+    """
+    url = "https://api.todoist.com/rest/v2/sections"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "project_id": project_id,
+        "name": section_name
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created Todoist section: {section_name} ({result.get('id')})")
+        return str(result.get("id"))
+    except Exception as e:
+        logger.error(f"Failed to create Todoist section: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None
+
+
+def get_or_create_todoist_section_for_matter(matter_id):
+    """
+    Get Todoist section for a matter, creating one if it doesn't exist.
+    
+    Uses the Office project (TODOIST_OFFICE_PROJECT_ID) and creates sections
+    within it for each matter. This keeps all legal work in one project
+    while organizing by matter.
+    
+    Deduplication logic:
+    1. Check Mappings database - if mapping exists, use that section ID
+    2. Get case name from Notion
+    3. Check Todoist Office project for section with that name - if exists, create mapping
+    4. If neither exists, create new section and mapping
+    
+    Returns (todoist_section_id, mapping_id, was_created)
+    """
+    if not matter_id:
+        return None, None, False
+    
+    if not TODOIST_OFFICE_PROJECT_ID:
+        logger.error("TODOIST_OFFICE_PROJECT_ID not set - cannot use sections")
+        return None, None, False
+    
+    # Step 1: Check Mappings database
+    todoist_section_id, mapping_id = get_todoist_section_for_matter(matter_id)
+    if todoist_section_id:
+        logger.info(f"Found existing section mapping for matter {matter_id}")
+        return todoist_section_id, mapping_id, False
+    
+    # Step 2: Get case name from Notion
+    case_name = get_case_name_from_notion(matter_id)
+    if not case_name:
+        logger.warning(f"Could not get case name for matter {matter_id}")
+        return None, None, False
+    
+    logger.info(f"No section mapping found for '{case_name}'. Checking Todoist Office project...")
+    
+    # Step 3: Check if section already exists with this name in Office project
+    existing_section_id = find_todoist_section_by_name(TODOIST_OFFICE_PROJECT_ID, case_name)
+    
+    if existing_section_id:
+        # Section exists in Todoist but no mapping - create mapping
+        logger.info(f"Found existing Todoist section '{case_name}'. Creating mapping...")
+        mapping_id = create_section_mapping_entry(matter_id, existing_section_id, case_name)
+        return existing_section_id, mapping_id, False
+    
+    # Step 4: Create new section and mapping
+    logger.info(f"Creating new Todoist section for '{case_name}' in Office project...")
+    new_section_id = create_todoist_section(TODOIST_OFFICE_PROJECT_ID, case_name)
+    
+    if not new_section_id:
+        logger.error(f"Failed to create Todoist section for {case_name}")
+        return None, None, False
+    
+    # Create mapping entry
+    mapping_id = create_section_mapping_entry(matter_id, new_section_id, case_name)
+    
+    return new_section_id, mapping_id, True
+
+
+def get_todoist_section_for_matter(matter_id):
+    """
+    Look up existing section mapping for a matter.
+    Returns (section_id, mapping_id) or (None, None) if no mapping found.
+    """
+    if not matter_id:
+        return None, None
+    
+    url = "https://api.notion.com/v1/databases/" + MAPPINGS_DATABASE_ID + "/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    data = {
+        "filter": {
+            "property": "Case",
+            "relation": {
+                "contains": matter_id
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            mapping = results[0]
+            props = mapping.get('properties', {})
+            
+            # Try new section_id property first, fall back to project_id for backwards compat
+            section_prop = props.get('Todoist_section_id', {})
+            if section_prop.get('rich_text'):
+                texts = section_prop['rich_text']
+                if texts:
+                    section_id = texts[0].get('plain_text', '')
+                    if section_id:
+                        return section_id, mapping.get('id')
+            
+            # Fall back to project_id for existing mappings
+            project_prop = props.get('Todoist_project_id', {})
+            if project_prop.get('rich_text'):
+                texts = project_prop['rich_text']
+                if texts:
+                    project_id = texts[0].get('plain_text', '')
+                    if project_id:
+                        logger.info(f"Using legacy project mapping for matter {matter_id}")
+                        return project_id, mapping.get('id')
+        
+        return None, None
+    except Exception as e:
+        logger.error(f"Failed to query section mapping: {e}")
+        return None, None
+
+
+def create_section_mapping_entry(matter_id, todoist_section_id, case_name):
+    """
+    Create entry in Mappings database linking matter to Todoist section.
+    """
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": case_name or "Auto-mapped"}}]
+        },
+        "Case": {
+            "relation": [{"id": matter_id}]
+        },
+        "Todoist_section_id": {
+            "rich_text": [{"text": {"content": str(todoist_section_id)}}]
+        }
+    }
+    
+    data = {
+        "parent": {"database_id": MAPPINGS_DATABASE_ID},
+        "properties": properties
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        logger.info(f"Created section mapping for {case_name}: {matter_id} → section {todoist_section_id}")
+        return result.get('id')
+    except Exception as e:
+        logger.error(f"Failed to create section mapping entry: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None
+
+
+def get_matter_for_todoist_section(section_id):
+    """
+    Look up matter ID from Todoist section ID.
+    Used for reverse sync - when task added in Todoist, find the linked matter.
+    
+    Returns (matter_id, case_name) or (None, None) if not a legal matter section.
+    """
+    if not section_id:
+        return None, None
+    
+    url = "https://api.notion.com/v1/databases/" + MAPPINGS_DATABASE_ID + "/query"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    data = {
+        "filter": {
+            "property": "Todoist_section_id",
+            "rich_text": {
+                "equals": str(section_id)
+            }
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        results = response.json().get('results', [])
+        
+        if results:
+            mapping = results[0]
+            props = mapping.get('properties', {})
+            
+            # Get matter ID from Case relation
+            case_relation = props.get('Case', {}).get('relation', [])
+            if case_relation:
+                matter_id = case_relation[0].get('id')
+                
+                # Get case name
+                name_prop = props.get('Name', {}).get('title', [])
+                case_name = name_prop[0].get('plain_text', '') if name_prop else ''
+                
+                logger.info(f"Found matter {matter_id} for Todoist section {section_id}")
+                return matter_id, case_name
+        
+        logger.debug(f"No mapping found for Todoist section {section_id}")
+        return None, None
+    except Exception as e:
+        logger.error(f"Failed to query matter for section: {e}")
+        return None, None
+
+
 def get_case_name_from_notion(matter_id):
     """
     Get the case name/caption from Legal Cases database.
@@ -1768,9 +2051,17 @@ def create_notion_task_from_todoist(todoist_task_id, title, due_date, project_id
         return None, None
 
 
-def create_todoist_task(title, due_date=None, priority="P2", project_id=None, description=None):
+def create_todoist_task(title, due_date=None, priority="P2", project_id=None, section_id=None, description=None):
     """
     Create a task in Todoist.
+    
+    Args:
+        title: Task content/title
+        due_date: Due date in YYYY-MM-DD format
+        priority: P1-P4 (P1 highest)
+        project_id: Todoist project ID (should be Office project for legal tasks)
+        section_id: Todoist section ID (matter-specific section within project)
+        description: Task description/notes
     
     Returns:
         tuple: (task_id, task_url) or (None, None) on failure
@@ -1795,6 +2086,9 @@ def create_todoist_task(title, due_date=None, priority="P2", project_id=None, de
     
     if project_id:
         data["project_id"] = project_id
+    
+    if section_id:
+        data["section_id"] = section_id
     
     if description:
         data["description"] = description
@@ -2518,18 +2812,18 @@ def promotion_webhook():
                     logger.warning("Failed to parse subtasks_json")
                     subtasks = []
         
-        # Get or create Todoist project for this matter (auto-creates if needed)
-        todoist_project_id, mapping_id, project_was_created = get_or_create_todoist_project_for_matter(matter_id)
+        # Get or create Todoist SECTION for this matter within the Office project
+        todoist_section_id, mapping_id, section_was_created = get_or_create_todoist_section_for_matter(matter_id)
         
-        if project_was_created:
-            logger.info(f"Auto-created Todoist project for matter {matter_id}: {todoist_project_id}")
-        elif todoist_project_id:
-            logger.info(f"Using existing Todoist project for matter {matter_id}: {todoist_project_id}")
+        if section_was_created:
+            logger.info(f"Auto-created Todoist section for matter {matter_id}: {todoist_section_id}")
+        elif todoist_section_id:
+            logger.info(f"Using existing Todoist section for matter {matter_id}: {todoist_section_id}")
         else:
-            logger.warning(f"No Todoist project for matter {matter_id}. Task will go to inbox.")
+            logger.warning(f"No Todoist section for matter {matter_id}. Task will go to Office project root.")
         
-        # Compute promotion key for idempotency
-        promotion_key = compute_promotion_key(notion_page_id, task_title, due_date, todoist_project_id)
+        # Compute promotion key for idempotency (using section_id)
+        promotion_key = compute_promotion_key(notion_page_id, task_title, due_date, todoist_section_id or "")
         logger.info(f"Promotion key: {promotion_key[:16]}...")
         
         # Check idempotency - has this exact promotion happened before?
@@ -2545,12 +2839,13 @@ def promotion_webhook():
         description_parts.append(f"Notion: {notion_link}")
         todoist_description = "\n".join(description_parts)
         
-        # Create Todoist task
+        # Create Todoist task in Office project, assigned to matter section
         todoist_task_id, todoist_url = create_todoist_task(
             title=task_title,
             due_date=due_date,
             priority=priority,
-            project_id=todoist_project_id,
+            project_id=TODOIST_OFFICE_PROJECT_ID,  # Always Office project
+            section_id=todoist_section_id,  # Matter-specific section
             description=todoist_description
         )
         
@@ -2573,7 +2868,7 @@ def promotion_webhook():
                     title=subtask_title,
                     parent_id=todoist_task_id,
                     due_date=subtask_due,
-                    project_id=todoist_project_id
+                    project_id=TODOIST_OFFICE_PROJECT_ID
                 )
                 
                 if subtask_id:
@@ -2632,7 +2927,7 @@ def todoist_webhook():
     """
     Todoist webhook handler for:
     1. item:completed - Sync completions back to Notion
-    2. item:added - Reverse sync manual tasks from legal projects to Notion
+    2. item:added - Reverse sync manual tasks from legal sections to Notion
     
     Todoist webhook payload:
     {
@@ -2642,6 +2937,7 @@ def todoist_webhook():
             "id": "todoist-task-id",
             "content": "Task title",
             "project_id": "...",
+            "section_id": "..." or null,
             "due": {"date": "2025-02-15", ...},
             ...
         }
@@ -2656,6 +2952,7 @@ def todoist_webhook():
         todoist_task_id = str(event_data.get('id', ''))
         task_content = event_data.get('content', '')
         project_id = str(event_data.get('project_id', ''))
+        section_id = str(event_data.get('section_id', '')) if event_data.get('section_id') else None
         
         if not todoist_task_id:
             return jsonify({"status": "error", "message": "No task ID in payload"}), 400
@@ -2664,7 +2961,7 @@ def todoist_webhook():
         if event_name in ['item:completed', 'item:complete']:
             return handle_todoist_completion(todoist_task_id, task_content)
         elif event_name in ['item:added', 'item:add']:
-            return handle_todoist_item_added(todoist_task_id, task_content, project_id, event_data)
+            return handle_todoist_item_added(todoist_task_id, task_content, project_id, section_id, event_data)
         else:
             logger.info(f"Ignoring event: {event_name}")
             return jsonify({"status": "ignored", "reason": f"Event {event_name} not handled"})
@@ -2726,33 +3023,58 @@ def handle_todoist_completion(todoist_task_id, task_content):
     })
 
 
-def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_data):
+def handle_todoist_item_added(todoist_task_id, task_content, project_id, section_id, event_data):
     """
     Handle item:added event - reverse sync from Todoist to Notion.
     
-    Only syncs tasks from LEGAL projects (those with mappings).
-    Personal projects (Home, Inbox, etc.) are ignored.
+    SECTION-BASED ARCHITECTURE:
+    - Tasks in Office project (TODOIST_OFFICE_PROJECT_ID) are legal tasks
+    - The section_id determines which matter the task belongs to
+    - Tasks in other projects are personal and ignored
+    - Tasks in Office project without a section are general office tasks
     
     Deduplication:
     1. Check if Notion task exists with this Todoist ID (promoted task)
     2. Check content fingerprint (same title + due + matter = duplicate)
     """
-    logger.info(f"Processing item:added for Todoist task: {todoist_task_id} in project {project_id}")
+    logger.info(f"Processing item:added for Todoist task: {todoist_task_id} in project {project_id}, section {section_id}")
     
-    # Step 1: Check if this project is mapped to a legal matter
-    matter_id, case_name = get_matter_for_todoist_project(project_id)
-    
-    if not matter_id:
-        # No mapping = personal project (Home, Inbox, Groceries, etc.)
-        logger.info(f"Ignoring task in unmapped project {project_id} (personal)")
+    # Step 1: Check if this task is in the Office project
+    if TODOIST_OFFICE_PROJECT_ID and project_id != TODOIST_OFFICE_PROJECT_ID:
+        # Not in Office project = personal project (Home, Inbox, Groceries, etc.)
+        logger.info(f"Ignoring task in non-Office project {project_id} (personal)")
         return jsonify({
             "status": "ignored",
-            "reason": "Personal project - not mapped to any legal matter",
+            "reason": "Personal project - not the Office project",
             "todoist_task_id": todoist_task_id,
             "project_id": project_id
         })
     
-    # Step 2: Check if Notion task already exists by Todoist ID
+    # Step 2: Check if task has a section (matter-specific)
+    if not section_id:
+        # Task in Office project but no section = general office task
+        logger.info(f"Task in Office project without section - general office task")
+        return jsonify({
+            "status": "ignored",
+            "reason": "General office task - no section/matter assigned",
+            "todoist_task_id": todoist_task_id,
+            "project_id": project_id
+        })
+    
+    # Step 3: Look up matter from section mapping
+    matter_id, case_name = get_matter_for_todoist_section(section_id)
+    
+    if not matter_id:
+        # Section exists but not mapped to a matter (manually created section?)
+        logger.info(f"Section {section_id} not mapped to any matter - ignoring")
+        return jsonify({
+            "status": "ignored",
+            "reason": "Section not mapped to any legal matter",
+            "todoist_task_id": todoist_task_id,
+            "section_id": section_id
+        })
+    
+    # Step 4: Check if Notion task already exists by Todoist ID
     # This catches tasks that were promoted FROM Notion
     if check_notion_task_exists_by_todoist_id(todoist_task_id):
         logger.info(f"Notion task already exists for Todoist {todoist_task_id} - skipping")
@@ -2762,13 +3084,13 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_d
             "todoist_task_id": todoist_task_id
         })
     
-    # Step 3: Extract due date if present
+    # Step 5: Extract due date if present
     due_date = None
     due_info = event_data.get('due')
     if due_info:
         due_date = due_info.get('date')  # Format: "2025-02-15"
     
-    # Step 4: Check content fingerprint for semantic duplicates
+    # Step 6: Check content fingerprint for semantic duplicates
     # This catches: email created task A, user manually creates same task in Todoist
     content_fingerprint = compute_task_content_fingerprint(task_content, due_date, matter_id)
     if check_task_content_fingerprint_exists(content_fingerprint):
@@ -2780,7 +3102,7 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_d
             "content_fingerprint": content_fingerprint[:16] + "..."
         })
     
-    # Step 5: Create Notion task linked to the matter
+    # Step 7: Create Notion task linked to the matter
     notion_page_id = create_notion_task_from_todoist(
         todoist_task_id=todoist_task_id,
         title=task_content,
@@ -2792,10 +3114,10 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_d
     if not notion_page_id:
         return jsonify({"status": "error", "message": "Failed to create Notion task"}), 500
     
-    # Step 6: Store content fingerprint for future deduplication
+    # Step 8: Store content fingerprint for future deduplication
     store_task_content_fingerprint(content_fingerprint, task_content, matter_id, notion_page_id, "reverse_sync")
     
-    # Step 7: Log the reverse sync event
+    # Step 9: Log the reverse sync event
     log_task_event(
         fingerprint=f"todoist-{todoist_task_id}",  # Use Todoist ID as pseudo-fingerprint
         task_title=task_content,
@@ -2803,7 +3125,7 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_d
         notion_page_id=notion_page_id
     )
     
-    # Step 8: Create Matter Activity
+    # Step 10: Create Matter Activity
     create_matter_activity(
         matter_id=matter_id,
         activity_type="Proposed",
@@ -2820,6 +3142,7 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, event_d
         "notion_page_id": notion_page_id,
         "matter_id": matter_id,
         "case_name": case_name,
+        "section_id": section_id,
         "task_title": task_content
     })
 
@@ -3127,15 +3450,24 @@ def todoist_admin():
 @app.route('/sync-matters', methods=['POST'])
 def sync_matters():
     """
-    Bulk sync: Create Todoist projects for all Legal Cases that don't have mappings.
+    Bulk sync: Create Todoist SECTIONS for all Legal Cases that don't have mappings.
+    
+    Uses the Office project (TODOIST_OFFICE_PROJECT_ID) and creates a section
+    for each matter.
     
     Options:
     - {"dry_run": true} - Preview what would be created without making changes
-    - {"dry_run": false} - Actually create projects and mappings
+    - {"dry_run": false} - Actually create sections and mappings
     """
     try:
         payload = request.json or {}
         dry_run = payload.get('dry_run', True)  # Default to dry run for safety
+        
+        if not TODOIST_OFFICE_PROJECT_ID:
+            return jsonify({
+                "status": "error",
+                "message": "TODOIST_OFFICE_PROJECT_ID not configured"
+            }), 400
         
         # Query all Legal Cases from Notion
         url = f"https://api.notion.com/v1/databases/{CASES_DATABASE_ID}/query"
@@ -3152,6 +3484,7 @@ def sync_matters():
         # Check each case for mapping
         results = {
             "total_cases": len(cases),
+            "office_project_id": TODOIST_OFFICE_PROJECT_ID,
             "already_mapped": [],
             "needs_mapping": [],
             "created": [],
@@ -3179,43 +3512,43 @@ def sync_matters():
                 })
                 continue
             
-            # Check if mapping exists
-            existing_project_id, mapping_id = get_todoist_project_for_matter(case_id)
+            # Check if section mapping exists
+            existing_section_id, mapping_id = get_todoist_section_for_matter(case_id)
             
-            if existing_project_id:
+            if existing_section_id:
                 results["already_mapped"].append({
                     "case_id": case_id,
                     "case_name": case_name,
-                    "todoist_project_id": existing_project_id
+                    "todoist_section_id": existing_section_id
                 })
             else:
                 if dry_run:
                     # Just record what would be created
-                    # Also check if Todoist project exists by name
-                    existing_todoist = find_todoist_project_by_name(case_name)
+                    # Also check if Todoist section exists by name
+                    existing_section = find_todoist_section_by_name(TODOIST_OFFICE_PROJECT_ID, case_name)
                     results["needs_mapping"].append({
                         "case_id": case_id,
                         "case_name": case_name,
-                        "todoist_project_exists": existing_todoist is not None,
-                        "existing_todoist_id": existing_todoist
+                        "todoist_section_exists": existing_section is not None,
+                        "existing_section_id": existing_section
                     })
                 else:
-                    # Actually create
-                    project_id, new_mapping_id, was_created = get_or_create_todoist_project_for_matter(case_id)
+                    # Actually create section
+                    section_id, new_mapping_id, was_created = get_or_create_todoist_section_for_matter(case_id)
                     
-                    if project_id:
+                    if section_id:
                         results["created"].append({
                             "case_id": case_id,
                             "case_name": case_name,
-                            "todoist_project_id": project_id,
+                            "todoist_section_id": section_id,
                             "mapping_id": new_mapping_id,
-                            "project_was_new": was_created
+                            "section_was_new": was_created
                         })
                     else:
                         results["errors"].append({
                             "case_id": case_id,
                             "case_name": case_name,
-                            "error": "Failed to create project or mapping"
+                            "error": "Failed to create section or mapping"
                         })
         
         return jsonify({
@@ -3242,7 +3575,7 @@ def root():
             "/calendar-sync": "POST - Flow 4: Calendar sync (preview)",
             "/digest": "GET/POST - Flow 5: Weekly digest data",
             "/todoist-admin": "POST - Todoist management (list/create projects, labels)",
-            "/sync-matters": "POST - Bulk sync Legal Cases to Todoist projects",
+            "/sync-matters": "POST - Bulk sync Legal Cases to Todoist sections in Office project",
             "/health": "GET - Health check"
         }
     })

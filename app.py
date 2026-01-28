@@ -3576,8 +3576,21 @@ def root():
             "/digest": "GET/POST - Flow 5: Weekly digest data",
             "/todoist-admin": "POST - Todoist management (list/create projects, labels)",
             "/sync-matters": "POST - Bulk sync Legal Cases to Todoist sections in Office project",
-            "/health": "GET - Health check"
+            "/health": "GET - Health check",
+            "/debug-config": "GET - Debug: Show loaded config values"
         }
+    })
+
+
+@app.route('/debug-config', methods=['GET'])
+def debug_config():
+    """Debug endpoint to verify environment variables are loaded."""
+    return jsonify({
+        "TODOIST_OFFICE_PROJECT_ID": TODOIST_OFFICE_PROJECT_ID,
+        "TODOIST_OFFICE_PROJECT_ID_is_set": TODOIST_OFFICE_PROJECT_ID is not None and len(TODOIST_OFFICE_PROJECT_ID) > 0 if TODOIST_OFFICE_PROJECT_ID else False,
+        "TODOIST_API_KEY_set": TODOIST_API_KEY is not None and len(TODOIST_API_KEY) > 5,
+        "NOTION_API_KEY_set": NOTION_API_KEY is not None and len(NOTION_API_KEY) > 5,
+        "env_var_raw": os.environ.get('TODOIST_OFFICE_PROJECT_ID', 'NOT_FOUND')
     })
 
 

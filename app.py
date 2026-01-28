@@ -2093,12 +2093,18 @@ def create_todoist_task(title, due_date=None, priority="P2", project_id=None, se
     if description:
         data["description"] = description
     
+    # DEBUG: Log what we're sending
+    logger.info(f"DEBUG create_todoist_task - project_id: {project_id}, section_id: {section_id}")
+    logger.info(f"DEBUG create_todoist_task - full data: {data}")
+    
     try:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
         task_id = result.get('id')
         task_url = result.get('url', f"https://todoist.com/showTask?id={task_id}")
+        # DEBUG: Log the response
+        logger.info(f"DEBUG create_todoist_task - response project_id: {result.get('project_id')}, section_id: {result.get('section_id')}")
         logger.info(f"Created Todoist task: {task_id} - {title}")
         return task_id, task_url
     except Exception as e:
@@ -2182,8 +2188,13 @@ def update_notion_task_with_todoist(notion_page_id, todoist_task_id, status="Pro
         }
     }
     
+    logger.info(f"DEBUG: Updating Notion task {notion_page_id} with data: {data}")
+    
     try:
         response = requests.patch(url, headers=headers, json=data)
+        logger.info(f"DEBUG: Notion update response status: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"DEBUG: Notion update failed: {response.text}")
         response.raise_for_status()
         logger.info(f"Updated Notion task {notion_page_id} with Todoist ID {todoist_task_id}")
         return True
@@ -3594,6 +3605,74 @@ def debug_config():
     })
 
 
+@app.route('/debug-create-task', methods=['POST'])
+def debug_create_task():
+    """Debug: Create a test task directly in Office project to verify project_id works."""
+    if not TODOIST_OFFICE_PROJECT_ID:
+        return jsonify({"error": "TODOIST_OFFICE_PROJECT_ID not set"}), 400
+    
+    url = "https://api.todoist.com/rest/v2/tasks"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "content": "DEBUG TEST TASK - Delete me",
+        "project_id": TODOIST_OFFICE_PROJECT_ID,
+        "priority": 2
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        return jsonify({
+            "status_code": response.status_code,
+            "sent_data": data,
+            "response": response.json() if response.status_code == 200 else response.text
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/debug-notion-update', methods=['POST'])
+def debug_notion_update():
+    """Debug: Test updating a Notion page to diagnose update failures."""
+    data = request.get_json() or {}
+    page_id = data.get('page_id')
+    
+    if not page_id:
+        return jsonify({"error": "page_id required"}), 400
+    
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    # Test update payload
+    update_data = {
+        "properties": {
+            "Todoist Task ID": {
+                "rich_text": [{"text": {"content": "TEST-12345"}}]
+            },
+            "Status": {
+                "status": {"name": "Promoted"}
+            }
+        }
+    }
+    
+    try:
+        response = requests.patch(url, headers=headers, json=update_data)
+        return jsonify({
+            "status_code": response.status_code,
+            "sent_data": update_data,
+            "response": response.json() if response.status_code == 200 else response.text
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     # Verify required environment variables
     required_vars = ['NOTION_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY', 'ANTHROPIC_API_KEY', 'TODOIST_API_KEY']
@@ -3604,4 +3683,3 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
- 

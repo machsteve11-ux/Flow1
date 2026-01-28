@@ -2978,10 +2978,24 @@ def todoist_webhook():
         }
     }
     """
+    global _recent_webhooks
+    
     try:
         payload = request.json
+        
+        # Log the incoming webhook for debugging
+        webhook_log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "payload": payload,
+            "headers": dict(request.headers)
+        }
+        _recent_webhooks.append(webhook_log_entry)
+        if len(_recent_webhooks) > 50:
+            _recent_webhooks = _recent_webhooks[-50:]
+        
         event_name = payload.get('event_name', '')
         logger.info(f"Todoist webhook received: {event_name}")
+        logger.info(f"Todoist webhook payload: {payload}")
         
         event_data = payload.get('event_data', {})
         todoist_task_id = str(event_data.get('id', ''))
@@ -3838,6 +3852,26 @@ def debug_todoist_webhook_config():
         },
         "test_command": "curl -X POST https://flow1-production.up.railway.app/todoist-webhook -H 'Content-Type: application/json' -d '{\"event_name\": \"item:completed\", \"event_data\": {\"id\": \"YOUR_TODOIST_TASK_ID\", \"content\": \"Test task\"}}'"
     })
+
+
+# Store recent webhook calls for debugging
+_recent_webhooks = []
+
+@app.route('/debug-webhook-log', methods=['GET'])
+def debug_webhook_log():
+    """Debug: Show recent webhook calls received."""
+    return jsonify({
+        "recent_webhooks": _recent_webhooks[-20:],  # Last 20
+        "count": len(_recent_webhooks)
+    })
+
+
+@app.route('/debug-webhook-clear', methods=['POST'])
+def debug_webhook_clear():
+    """Debug: Clear webhook log."""
+    global _recent_webhooks
+    _recent_webhooks = []
+    return jsonify({"status": "cleared"})
 
 
 @app.route('/debug-todoist-webhook-test', methods=['POST'])

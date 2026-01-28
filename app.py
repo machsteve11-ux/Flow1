@@ -56,7 +56,7 @@ TASKS_DATABASE_ID = "2aee43055e06803dbf90d54231711e61"
 CASES_DATABASE_ID = "2aee43055e0681ad8e43e6e67825f9dd"
 CALENDAR_DATABASE_ID = "2cbe43055e06806d88bafb4b136061b5"
 MAPPINGS_DATABASE_ID = "2aee43055e06802782abfee92f846d88"
-MATTER_ACTIVITY_DATABASE_ID = "2aee43055e06800fb4860009681c5fe"  # Will need to verify this ID
+MATTER_ACTIVITY_DATABASE_ID = "2aee43055e06809591aaf6b59c415a1b"
 
 # Matter Activity Property IDs (from Flow 3 blueprint)
 MATTER_ACTIVITY_PROPS = {
@@ -3671,6 +3671,89 @@ def debug_notion_update():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/debug-section-creation', methods=['POST'])
+def debug_section_creation():
+    """Debug: Trace section creation step by step."""
+    data = request.get_json() or {}
+    matter_id = data.get('matter_id')
+    
+    if not matter_id:
+        return jsonify({"error": "matter_id required"}), 400
+    
+    debug_info = {
+        "matter_id": matter_id,
+        "TODOIST_OFFICE_PROJECT_ID": TODOIST_OFFICE_PROJECT_ID,
+        "steps": []
+    }
+    
+    # Step 1: Check if OFFICE PROJECT ID is set
+    if not TODOIST_OFFICE_PROJECT_ID:
+        debug_info["steps"].append({"step": 1, "error": "TODOIST_OFFICE_PROJECT_ID not set"})
+        return jsonify(debug_info)
+    debug_info["steps"].append({"step": 1, "result": "Office project ID is set"})
+    
+    # Step 2: Check existing mapping
+    existing_section_id, mapping_id = get_todoist_section_for_matter(matter_id)
+    debug_info["steps"].append({
+        "step": 2, 
+        "action": "get_todoist_section_for_matter",
+        "result": {"section_id": existing_section_id, "mapping_id": mapping_id}
+    })
+    
+    if existing_section_id:
+        debug_info["conclusion"] = "Mapping already exists"
+        return jsonify(debug_info)
+    
+    # Step 3: Get case name from Notion
+    case_name = get_case_name_from_notion(matter_id)
+    debug_info["steps"].append({
+        "step": 3,
+        "action": "get_case_name_from_notion",
+        "result": case_name
+    })
+    
+    if not case_name:
+        # Let's also fetch the raw page to see what properties exist
+        url = f"https://api.notion.com/v1/pages/{matter_id}"
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28"
+        }
+        try:
+            response = requests.get(url, headers=headers)
+            page = response.json()
+            prop_names = list(page.get('properties', {}).keys())
+            debug_info["steps"].append({
+                "step": "3b",
+                "action": "list_matter_properties",
+                "result": prop_names
+            })
+        except Exception as e:
+            debug_info["steps"].append({"step": "3b", "error": str(e)})
+        
+        debug_info["conclusion"] = "Failed to get case name"
+        return jsonify(debug_info)
+    
+    # Step 4: Check if section already exists in Todoist
+    existing_in_todoist = find_todoist_section_by_name(TODOIST_OFFICE_PROJECT_ID, case_name)
+    debug_info["steps"].append({
+        "step": 4,
+        "action": "find_todoist_section_by_name",
+        "result": existing_in_todoist
+    })
+    
+    # Step 5: List all sections in Office project
+    all_sections = list_todoist_sections(TODOIST_OFFICE_PROJECT_ID)
+    debug_info["steps"].append({
+        "step": 5,
+        "action": "list_todoist_sections",
+        "result": all_sections
+    })
+    
+    debug_info["conclusion"] = f"Ready to create section '{case_name}'"
+    return jsonify(debug_info)
 
 
 if __name__ == '__main__':

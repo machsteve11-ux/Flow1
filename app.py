@@ -2385,8 +2385,23 @@ def promotion_webhook():
         
         logger.info(f"Processing promotion for page: {notion_page_id}")
         
-        # Extract properties
+        # Extract properties - if not provided, fetch from Notion
         properties = page_data.get('properties', {})
+        
+        if not properties:
+            # Fetch page from Notion API
+            logger.info(f"No properties in payload, fetching from Notion...")
+            fetch_url = f"https://api.notion.com/v1/pages/{notion_page_id}"
+            fetch_headers = {
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Notion-Version": "2022-06-28"
+            }
+            fetch_response = requests.get(fetch_url, headers=fetch_headers)
+            if fetch_response.status_code != 200:
+                logger.error(f"Failed to fetch page: {fetch_response.text}")
+                return jsonify({"status": "error", "message": "Failed to fetch page from Notion"}), 400
+            page_data = fetch_response.json()
+            properties = page_data.get('properties', {})
         
         # Get task title
         title_prop = properties.get('Name', {}) or properties.get('Title', {})

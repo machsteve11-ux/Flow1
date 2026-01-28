@@ -1458,6 +1458,8 @@ def create_todoist_section(project_id, section_name):
     Create a new section in a Todoist project.
     Returns section ID on success.
     """
+    logger.info(f"DEBUG create_todoist_section called: project_id={project_id}, section_name={section_name}")
+    
     url = "https://api.todoist.com/rest/v2/sections"
     headers = {
         "Authorization": f"Bearer {TODOIST_API_KEY}",
@@ -1469,8 +1471,12 @@ def create_todoist_section(project_id, section_name):
         "name": section_name
     }
     
+    logger.info(f"DEBUG: Sending to Todoist: {data}")
+    
     try:
         response = requests.post(url, headers=headers, json=data)
+        logger.info(f"DEBUG: Todoist response status: {response.status_code}")
+        logger.info(f"DEBUG: Todoist response body: {response.text}")
         response.raise_for_status()
         result = response.json()
         logger.info(f"Created Todoist section: {section_name} ({result.get('id')})")
@@ -1498,7 +1504,10 @@ def get_or_create_todoist_section_for_matter(matter_id):
     
     Returns (todoist_section_id, mapping_id, was_created)
     """
+    logger.info(f"DEBUG get_or_create_todoist_section_for_matter called with matter_id={matter_id}")
+    
     if not matter_id:
+        logger.warning("DEBUG: matter_id is None or empty")
         return None, None, False
     
     if not TODOIST_OFFICE_PROJECT_ID:
@@ -1506,13 +1515,16 @@ def get_or_create_todoist_section_for_matter(matter_id):
         return None, None, False
     
     # Step 1: Check Mappings database
+    logger.info("DEBUG: Step 1 - checking Mappings database")
     todoist_section_id, mapping_id = get_todoist_section_for_matter(matter_id)
     if todoist_section_id:
         logger.info(f"Found existing section mapping for matter {matter_id}")
         return todoist_section_id, mapping_id, False
     
     # Step 2: Get case name from Notion
+    logger.info("DEBUG: Step 2 - getting case name from Notion")
     case_name = get_case_name_from_notion(matter_id)
+    logger.info(f"DEBUG: case_name = {case_name}")
     if not case_name:
         logger.warning(f"Could not get case name for matter {matter_id}")
         return None, None, False
@@ -1520,7 +1532,9 @@ def get_or_create_todoist_section_for_matter(matter_id):
     logger.info(f"No section mapping found for '{case_name}'. Checking Todoist Office project...")
     
     # Step 3: Check if section already exists with this name in Office project
+    logger.info("DEBUG: Step 3 - checking for existing section in Todoist")
     existing_section_id = find_todoist_section_by_name(TODOIST_OFFICE_PROJECT_ID, case_name)
+    logger.info(f"DEBUG: existing_section_id = {existing_section_id}")
     
     if existing_section_id:
         # Section exists in Todoist but no mapping - create mapping
@@ -1529,15 +1543,18 @@ def get_or_create_todoist_section_for_matter(matter_id):
         return existing_section_id, mapping_id, False
     
     # Step 4: Create new section and mapping
-    logger.info(f"Creating new Todoist section for '{case_name}' in Office project...")
+    logger.info(f"DEBUG: Step 4 - creating new Todoist section for '{case_name}' in Office project...")
     new_section_id = create_todoist_section(TODOIST_OFFICE_PROJECT_ID, case_name)
+    logger.info(f"DEBUG: new_section_id = {new_section_id}")
     
     if not new_section_id:
         logger.error(f"Failed to create Todoist section for {case_name}")
         return None, None, False
     
     # Create mapping entry
+    logger.info("DEBUG: Step 5 - creating mapping entry")
     mapping_id = create_section_mapping_entry(matter_id, new_section_id, case_name)
+    logger.info(f"DEBUG: mapping_id = {mapping_id}")
     
     return new_section_id, mapping_id, True
 
@@ -2824,7 +2841,9 @@ def promotion_webhook():
                     subtasks = []
         
         # Get or create Todoist SECTION for this matter within the Office project
+        logger.info(f"DEBUG: matter_id before section creation = {matter_id}")
         todoist_section_id, mapping_id, section_was_created = get_or_create_todoist_section_for_matter(matter_id)
+        logger.info(f"DEBUG: section result = section_id:{todoist_section_id}, mapping_id:{mapping_id}, created:{section_was_created}")
         
         if section_was_created:
             logger.info(f"Auto-created Todoist section for matter {matter_id}: {todoist_section_id}")
@@ -3678,6 +3697,7 @@ def debug_section_creation():
     """Debug: Trace section creation step by step."""
     data = request.get_json() or {}
     matter_id = data.get('matter_id')
+    force_create = data.get('force_create', False)
     
     if not matter_id:
         return jsonify({"error": "matter_id required"}), 400
@@ -3702,7 +3722,7 @@ def debug_section_creation():
         "result": {"section_id": existing_section_id, "mapping_id": mapping_id}
     })
     
-    if existing_section_id:
+    if existing_section_id and not force_create:
         debug_info["conclusion"] = "Mapping already exists"
         return jsonify(debug_info)
     
@@ -3752,7 +3772,29 @@ def debug_section_creation():
         "result": all_sections
     })
     
-    debug_info["conclusion"] = f"Ready to create section '{case_name}'"
+    # Step 6: If force_create, actually create the section
+    if force_create:
+        new_section_id = create_todoist_section(TODOIST_OFFICE_PROJECT_ID, case_name)
+        debug_info["steps"].append({
+            "step": 6,
+            "action": "create_todoist_section",
+            "result": new_section_id
+        })
+        
+        if new_section_id:
+            # Also create the mapping
+            mapping_id = create_section_mapping_entry(matter_id, new_section_id, case_name)
+            debug_info["steps"].append({
+                "step": 7,
+                "action": "create_section_mapping_entry",
+                "result": mapping_id
+            })
+            debug_info["conclusion"] = f"Created section '{case_name}' with ID {new_section_id}"
+        else:
+            debug_info["conclusion"] = "Section creation failed"
+    else:
+        debug_info["conclusion"] = f"Ready to create section '{case_name}' - add force_create:true to actually create"
+    
     return jsonify(debug_info)
 
 

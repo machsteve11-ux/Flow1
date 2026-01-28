@@ -10,7 +10,7 @@ This service:
 5. Extracts tasks using Claude API (email body) and Gemini API (attachments)
 6. Creates tasks in Notion
 7. Logs to Supabase audit trail
-"""
+""" 
 
 import os
 import re

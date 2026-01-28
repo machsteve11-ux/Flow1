@@ -3659,6 +3659,67 @@ def debug_todoist_projects():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/debug-matter-activity', methods=['POST'])
+def debug_matter_activity():
+    """Debug: Test Matter Activity creation directly."""
+    data = request.get_json() or {}
+    matter_id = data.get('matter_id')
+    
+    if not matter_id:
+        return jsonify({"error": "matter_id required"}), 400
+    
+    debug_info = {
+        "matter_id": matter_id,
+        "MATTER_ACTIVITY_DATABASE_ID": MATTER_ACTIVITY_DATABASE_ID
+    }
+    
+    # Try to create a test activity
+    url = "https://api.notion.com/v1/pages"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": "DEBUG TEST - Delete me"}}]
+        },
+        "Type": {
+            "select": {"name": "Promoted"}
+        },
+        "Source": {
+            "select": {"name": "System"}
+        },
+        "Case": {
+            "relation": [{"id": matter_id}]
+        }
+    }
+    
+    payload = {
+        "parent": {"database_id": MATTER_ACTIVITY_DATABASE_ID},
+        "properties": properties
+    }
+    
+    debug_info["payload"] = payload
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        debug_info["status_code"] = response.status_code
+        debug_info["response"] = response.json() if response.status_code == 200 else response.text
+        
+        if response.status_code == 200:
+            debug_info["conclusion"] = "SUCCESS - Matter Activity created"
+        else:
+            debug_info["conclusion"] = "FAILED - See response for error"
+            
+    except Exception as e:
+        debug_info["error"] = str(e)
+        debug_info["conclusion"] = "EXCEPTION - See error"
+    
+    return jsonify(debug_info)
+
+
 @app.route('/debug-create-task', methods=['POST'])
 def debug_create_task():
     """Debug: Create a test task directly in Office project to verify project_id works."""

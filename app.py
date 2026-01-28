@@ -1768,6 +1768,52 @@ def create_notion_task_from_todoist(todoist_task_id, title, due_date, project_id
         return None, None
 
 
+def create_todoist_task(title, due_date=None, priority="P2", project_id=None, description=None):
+    """
+    Create a task in Todoist.
+    
+    Returns:
+        tuple: (task_id, task_url) or (None, None) on failure
+    """
+    url = "https://api.todoist.com/rest/v2/tasks"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Map priority string to Todoist priority (P1=4, P2=3, P3=2, P4=1)
+    priority_map = {"P1": 4, "P2": 3, "P3": 2, "P4": 1}
+    todoist_priority = priority_map.get(priority, 3)
+    
+    data = {
+        "content": title,
+        "priority": todoist_priority
+    }
+    
+    if due_date:
+        data["due_date"] = due_date
+    
+    if project_id:
+        data["project_id"] = project_id
+    
+    if description:
+        data["description"] = description
+    
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        task_id = result.get('id')
+        task_url = result.get('url', f"https://todoist.com/showTask?id={task_id}")
+        logger.info(f"Created Todoist task: {task_id} - {title}")
+        return task_id, task_url
+    except Exception as e:
+        logger.error(f"Todoist task creation failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response: {e.response.text}")
+        return None, None
+
+
 def create_todoist_subtask(title, parent_id, due_date=None, project_id=None):
     """
     Create subtask in Todoist with parent_id reference.

@@ -997,16 +997,57 @@ def extract_first_plaintiff(caption):
     return None
 
 
+# Cache for data_source_id (fetched once per database)
+_data_source_id_cache = {}
+
+def get_data_source_id(database_id):
+    """
+    Get the data_source_id for a database using the new 2025-09-03 API.
+    Required for creating pages with templates.
+    """
+    if database_id in _data_source_id_cache:
+        return _data_source_id_cache[database_id]
+    
+    url = f"https://api.notion.com/v1/databases/{database_id}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2025-09-03"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract data_source_id from the data_sources array
+        data_sources = result.get('data_sources', [])
+        if data_sources:
+            data_source_id = data_sources[0]['id']
+            _data_source_id_cache[database_id] = data_source_id
+            logger.info(f"Fetched data_source_id for database {database_id}: {data_source_id}")
+            return data_source_id
+        else:
+            logger.error(f"No data sources found for database {database_id}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get data_source_id for database {database_id}: {e}")
+        return None
+
+
 def create_stub_matter(index_number, caption, venue=None):
     """
     Create a stub matter in Legal Cases database when no match is found.
+    Uses the default template to include linked database views with self-referential filters.
     Returns the new matter's Notion page ID.
     """
+    # Get the data_source_id for template support (requires 2025-09-03 API)
+    data_source_id = get_data_source_id(CASES_DATABASE_ID)
+    
     url = "https://api.notion.com/v1/pages"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
+        "Notion-Version": "2025-09-03"
     }
     
     # Extract first plaintiff for Case Name
@@ -1036,10 +1077,25 @@ def create_stub_matter(index_number, caption, venue=None):
             "rich_text": [{"text": {"content": venue}}]
         }
     
-    data = {
-        "parent": {"database_id": CASES_DATABASE_ID},
-        "properties": properties
-    }
+    # Build request data - use data_source_id if available (for template support)
+    if data_source_id:
+        data = {
+            "parent": {
+                "type": "data_source_id",
+                "data_source_id": data_source_id
+            },
+            "properties": properties,
+            "template": {"type": "default"}  # Apply the default template!
+        }
+        logger.info(f"Creating stub matter with template using data_source_id: {data_source_id}")
+    else:
+        # Fallback to old API if data_source_id lookup fails
+        logger.warning("Falling back to legacy API (no template support)")
+        headers["Notion-Version"] = "2022-06-28"
+        data = {
+            "parent": {"database_id": CASES_DATABASE_ID},
+            "properties": properties
+        }
     
     try:
         response = requests.post(url, headers=headers, json=data)
@@ -4178,6 +4234,118 @@ def debug_section_creation():
         debug_info["conclusion"] = f"Ready to create section '{case_name}' - add force_create:true to actually create"
     
     return jsonify(debug_info)
+
+
+@app.route('/debug-stub-matter-template', methods=['POST'])
+def debug_stub_matter_template():
+    """Debug: Test creating a stub matter with template support."""
+    data = request.get_json() or {}
+    index_number = data.get('index_number', 'TEST-2026-001')
+    caption = data.get('caption', 'Test Matter v. Test Corp')
+    venue = data.get('venue', 'Supreme Court, Albany County')
+    dry_run = data.get('dry_run', True)  # Default to dry run
+    
+    debug_info = {
+        "input": {
+            "index_number": index_number,
+            "caption": caption,
+            "venue": venue,
+            "dry_run": dry_run
+        },
+        "steps": []
+    }
+    
+    # Step 1: Get data_source_id
+    data_source_id = get_data_source_id(CASES_DATABASE_ID)
+    debug_info["steps"].append({
+        "step": 1,
+        "action": "get_data_source_id",
+        "database_id": CASES_DATABASE_ID,
+        "result": data_source_id
+    })
+    
+    if not data_source_id:
+        debug_info["conclusion"] = "FAILED - Could not get data_source_id"
+        return jsonify(debug_info), 500
+    
+    # Step 2: Show what the request would look like
+    case_name = extract_first_plaintiff(caption) or caption or "Unknown Matter"
+    
+    request_data = {
+        "parent": {
+            "type": "data_source_id",
+            "data_source_id": data_source_id
+        },
+        "properties": {
+            "Case Name": {"title": [{"text": {"content": case_name}}]},
+            "Index_number": {"rich_text": [{"text": {"content": index_number}}]},
+            "Title": {"rich_text": [{"text": {"content": caption}}]},
+            "Status": {"select": {"name": "Pending"}},
+            "Date Opened": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}}
+        },
+        "template": {"type": "default"}
+    }
+    if venue:
+        request_data["properties"]["Venue"] = {"rich_text": [{"text": {"content": venue}}]}
+    
+    debug_info["steps"].append({
+        "step": 2,
+        "action": "build_request",
+        "api_version": "2025-09-03",
+        "request_data": request_data
+    })
+    
+    if dry_run:
+        debug_info["conclusion"] = "DRY RUN - Set dry_run:false to actually create"
+        return jsonify(debug_info)
+    
+    # Step 3: Actually create the matter
+    try:
+        matter_id = create_stub_matter(index_number, caption, venue)
+        debug_info["steps"].append({
+            "step": 3,
+            "action": "create_stub_matter",
+            "result": matter_id
+        })
+        
+        if matter_id:
+            debug_info["conclusion"] = f"SUCCESS - Created matter with ID: {matter_id}"
+            debug_info["notion_url"] = f"https://notion.so/{matter_id.replace('-', '')}"
+        else:
+            debug_info["conclusion"] = "FAILED - create_stub_matter returned None"
+            
+    except Exception as e:
+        debug_info["steps"].append({
+            "step": 3,
+            "action": "create_stub_matter",
+            "error": str(e)
+        })
+        debug_info["conclusion"] = f"FAILED - Exception: {str(e)}"
+        return jsonify(debug_info), 500
+    
+    return jsonify(debug_info)
+
+
+@app.route('/debug-data-source-id', methods=['GET'])
+def debug_data_source_id():
+    """Debug: Get data_source_id for all known databases."""
+    databases = {
+        "CASES_DATABASE_ID": CASES_DATABASE_ID,
+        "TASKS_DATABASE_ID": TASKS_DATABASE_ID,
+        "MATTER_ACTIVITY_DATABASE_ID": MATTER_ACTIVITY_DATABASE_ID,
+        "APPOINTMENTS_DATABASE_ID": APPOINTMENTS_DATABASE_ID if 'APPOINTMENTS_DATABASE_ID' in globals() else None
+    }
+    
+    results = {}
+    for name, db_id in databases.items():
+        if db_id:
+            data_source_id = get_data_source_id(db_id)
+            results[name] = {
+                "database_id": db_id,
+                "data_source_id": data_source_id
+            }
+    
+    return jsonify(results)
 
 
 if __name__ == '__main__':

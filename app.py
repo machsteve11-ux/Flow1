@@ -2256,7 +2256,7 @@ def log_promotion_event(notion_page_id, task_title, todoist_task_id, promotion_k
 def create_matter_activity(matter_id, activity_type, description, related_task_id=None, source="System"):
     """
     Create Matter Activity entry in Notion.
-    Uses property IDs from blueprint for reliability.
+    Uses property names for reliability across different databases.
     """
     if not matter_id:
         logger.warning("No matter_id provided for activity logging")
@@ -2269,29 +2269,29 @@ def create_matter_activity(matter_id, activity_type, description, related_task_i
         "Notion-Version": "2022-06-28"
     }
     
-    # Use property IDs from MATTER_ACTIVITY_PROPS
+    # Use property names (more reliable than IDs)
     properties = {
-        # Title (Name) - use "title" key
-        "title": {
+        # Title/Name property
+        "Name": {
             "title": [{"text": {"content": description}}]
         },
         # Type: Note, Completed, Promoted, Proposed
-        MATTER_ACTIVITY_PROPS["type"]: {
+        "Type": {
             "select": {"name": activity_type}
         },
         # Source: System, Manual, Todoist, Email
-        MATTER_ACTIVITY_PROPS["source"]: {
+        "Source": {
             "select": {"name": source}
         },
         # Case relation
-        MATTER_ACTIVITY_PROPS["case"]: {
+        "Case": {
             "relation": [{"id": matter_id}]
         }
     }
     
-    # Related Task ID relation
+    # Related Task ID relation (optional)
     if related_task_id:
-        properties[MATTER_ACTIVITY_PROPS["related_task"]] = {
+        properties["Related Task ID"] = {
             "relation": [{"id": related_task_id}]
         }
     
@@ -2300,8 +2300,13 @@ def create_matter_activity(matter_id, activity_type, description, related_task_i
         "properties": properties
     }
     
+    logger.info(f"DEBUG create_matter_activity: {data}")
+    
     try:
         response = requests.post(url, headers=headers, json=data)
+        logger.info(f"DEBUG: Matter Activity response status: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"DEBUG: Matter Activity failed: {response.text}")
         response.raise_for_status()
         result = response.json()
         logger.info(f"Created Matter Activity: {description}")

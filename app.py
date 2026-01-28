@@ -3624,6 +3624,36 @@ def debug_config():
     })
 
 
+@app.route('/debug-todoist-projects', methods=['GET'])
+def debug_todoist_projects():
+    """Debug: List all Todoist projects to find correct Office project ID."""
+    url = "https://api.todoist.com/rest/v2/projects"
+    headers = {
+        "Authorization": f"Bearer {TODOIST_API_KEY}"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        projects = response.json()
+        
+        # Find Office project
+        office_project = None
+        for p in projects:
+            if p.get('name', '').lower() == 'office':
+                office_project = p
+                break
+        
+        return jsonify({
+            "all_projects": [{"id": p.get('id'), "name": p.get('name')} for p in projects],
+            "office_project": office_project,
+            "current_env_var": TODOIST_OFFICE_PROJECT_ID,
+            "recommendation": f"Set TODOIST_OFFICE_PROJECT_ID to: {office_project.get('id')}" if office_project else "No 'Office' project found"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/debug-create-task', methods=['POST'])
 def debug_create_task():
     """Debug: Create a test task directly in Office project to verify project_id works."""

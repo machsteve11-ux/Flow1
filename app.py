@@ -3720,6 +3720,215 @@ def debug_matter_activity():
     return jsonify(debug_info)
 
 
+@app.route('/debug-find-task-by-todoist-id', methods=['POST'])
+def debug_find_task_by_todoist_id():
+    """Debug: Test finding a Notion task by its Todoist Task ID."""
+    data = request.get_json() or {}
+    todoist_task_id = data.get('todoist_task_id')
+    
+    if not todoist_task_id:
+        return jsonify({"error": "todoist_task_id required"}), 400
+    
+    debug_info = {
+        "todoist_task_id": todoist_task_id,
+        "TASKS_DATABASE_ID": TASKS_DATABASE_ID
+    }
+    
+    # Try to find the task
+    notion_task = find_notion_task_by_todoist_id(todoist_task_id)
+    
+    if notion_task:
+        debug_info["found"] = True
+        debug_info["notion_task"] = notion_task
+        debug_info["conclusion"] = "SUCCESS - Task found in Notion"
+    else:
+        debug_info["found"] = False
+        debug_info["conclusion"] = "NOT FOUND - No Notion task with this Todoist ID"
+    
+    return jsonify(debug_info)
+
+
+@app.route('/debug-completion-sync', methods=['POST'])
+def debug_completion_sync():
+    """Debug: Manually trigger completion sync for a Todoist task."""
+    data = request.get_json() or {}
+    todoist_task_id = data.get('todoist_task_id')
+    
+    if not todoist_task_id:
+        return jsonify({"error": "todoist_task_id required"}), 400
+    
+    debug_info = {
+        "todoist_task_id": todoist_task_id,
+        "steps": []
+    }
+    
+    # Step 1: Find Notion task
+    notion_task = find_notion_task_by_todoist_id(todoist_task_id)
+    debug_info["steps"].append({
+        "step": 1,
+        "action": "find_notion_task_by_todoist_id",
+        "result": notion_task
+    })
+    
+    if not notion_task:
+        debug_info["conclusion"] = "FAILED - Task not found in Notion"
+        return jsonify(debug_info)
+    
+    notion_page_id = notion_task['id']
+    task_title = notion_task['title']
+    matter_id = notion_task.get('matter_id')
+    
+    # Step 2: Mark as completed
+    success = mark_notion_task_completed(notion_page_id)
+    debug_info["steps"].append({
+        "step": 2,
+        "action": "mark_notion_task_completed",
+        "result": success
+    })
+    
+    if not success:
+        debug_info["conclusion"] = "FAILED - Could not update Notion task"
+        return jsonify(debug_info)
+    
+    # Step 3: Log completion event
+    log_completion_event(notion_page_id, task_title, todoist_task_id)
+    debug_info["steps"].append({
+        "step": 3,
+        "action": "log_completion_event",
+        "result": "logged"
+    })
+    
+    # Step 4: Create Matter Activity
+    if matter_id:
+        activity_id = create_matter_activity(
+            matter_id=matter_id,
+            activity_type="Completed",
+            description=f"Completed: {task_title}",
+            related_task_id=notion_page_id,
+            source="Todoist"
+        )
+        debug_info["steps"].append({
+            "step": 4,
+            "action": "create_matter_activity",
+            "result": activity_id
+        })
+    else:
+        debug_info["steps"].append({
+            "step": 4,
+            "action": "create_matter_activity",
+            "result": "skipped - no matter_id"
+        })
+    
+    debug_info["conclusion"] = f"SUCCESS - Task '{task_title}' marked completed"
+    return jsonify(debug_info)
+
+
+@app.route('/debug-todoist-webhook-config', methods=['GET'])
+def debug_todoist_webhook_config():
+    """Debug: Show Todoist webhook configuration info."""
+    return jsonify({
+        "webhook_url": "https://flow1-production.up.railway.app/todoist-webhook",
+        "expected_events": ["item:completed", "item:added"],
+        "instructions": {
+            "1": "Go to https://developer.todoist.com/appconsole.html",
+            "2": "Find or create your app",
+            "3": "Under Webhooks, set callback URL to the webhook_url above",
+            "4": "Enable events: item:completed, item:added",
+            "5": "Copy the HMAC secret if verification is needed"
+        },
+        "test_command": "curl -X POST https://flow1-production.up.railway.app/todoist-webhook -H 'Content-Type: application/json' -d '{\"event_name\": \"item:completed\", \"event_data\": {\"id\": \"YOUR_TODOIST_TASK_ID\", \"content\": \"Test task\"}}'"
+    })
+
+
+@app.route('/debug-todoist-webhook-test', methods=['POST'])
+def debug_todoist_webhook_test():
+    """Debug: Simulate a Todoist completion webhook to test Flow 3."""
+    data = request.get_json() or {}
+    todoist_task_id = data.get('todoist_task_id')
+    
+    if not todoist_task_id:
+        return jsonify({"error": "todoist_task_id required"}), 400
+    
+    debug_info = {
+        "todoist_task_id": todoist_task_id,
+        "steps": []
+    }
+    
+    # Step 1: Find Notion task by Todoist ID
+    notion_task = find_notion_task_by_todoist_id(todoist_task_id)
+    debug_info["steps"].append({
+        "step": 1,
+        "action": "find_notion_task_by_todoist_id",
+        "result": notion_task
+    })
+    
+    if not notion_task:
+        debug_info["conclusion"] = f"FAILED - No Notion task found with Todoist ID {todoist_task_id}"
+        return jsonify(debug_info)
+    
+    notion_page_id = notion_task['id']
+    task_title = notion_task['title']
+    matter_id = notion_task.get('matter_id')
+    
+    debug_info["notion_page_id"] = notion_page_id
+    debug_info["task_title"] = task_title
+    debug_info["matter_id"] = matter_id
+    
+    # Step 2: Mark as completed (only if force_complete is true)
+    force_complete = data.get('force_complete', False)
+    
+    if force_complete:
+        success = mark_notion_task_completed(notion_page_id)
+        debug_info["steps"].append({
+            "step": 2,
+            "action": "mark_notion_task_completed",
+            "result": "success" if success else "failed"
+        })
+        
+        if success:
+            # Log completion event
+            log_completion_event(notion_page_id, task_title, todoist_task_id)
+            debug_info["steps"].append({
+                "step": 3,
+                "action": "log_completion_event",
+                "result": "logged"
+            })
+            
+            # Create Matter Activity
+            if matter_id:
+                activity_id = create_matter_activity(
+                    matter_id=matter_id,
+                    activity_type="Completed",
+                    description=f"Completed: {task_title}",
+                    related_task_id=notion_page_id,
+                    source="Todoist"
+                )
+                debug_info["steps"].append({
+                    "step": 4,
+                    "action": "create_matter_activity",
+                    "result": activity_id
+                })
+            
+            debug_info["conclusion"] = "SUCCESS - Task marked completed"
+        else:
+            debug_info["conclusion"] = "FAILED - Could not update Notion"
+    else:
+        debug_info["conclusion"] = f"READY - Found task. Add force_complete:true to actually complete it."
+    
+    return jsonify(debug_info)
+
+
+@app.route('/debug-todoist-webhook-log', methods=['POST'])
+def debug_todoist_webhook_log():
+    """Debug: Log raw Todoist webhook payload to see what's being received."""
+    payload = request.json
+    logger.info(f"DEBUG Todoist webhook raw payload: {json.dumps(payload)}")
+    return jsonify({
+        "status": "logged",
+        "received_payload": payload
+    })
+
+
 @app.route('/debug-create-task', methods=['POST'])
 def debug_create_task():
     """Debug: Create a test task directly in Office project to verify project_id works."""

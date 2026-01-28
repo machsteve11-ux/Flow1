@@ -1864,6 +1864,9 @@ def calculate_subtask_due_date(parent_due_date, offset_days):
     except Exception as e:
         logger.error(f"Failed to calculate subtask due date: {e}")
         return None
+
+
+def update_notion_task_with_todoist(notion_page_id, todoist_task_id, status="Promoted"):
     """
     Update Notion task with Todoist task ID after promotion.
     """

@@ -1,5 +1,5 @@
 """
-Anaïs Email Intake Service
+AnaÃ¯s Email Intake Service
 Replaces Make.com Flow 1: Email intake, AI extraction, Notion task creation
 
 This service:
@@ -10,7 +10,7 @@ This service:
 5. Extracts tasks using Claude API (email body) and Gemini API (attachments)
 6. Creates tasks in Notion
 7. Logs to Supabase audit trail
-""" 
+"""
 
 import os
 import re
@@ -145,7 +145,7 @@ If the document indicates a complex deliverable with component work items, extra
 For each subtask, provide:
 - title: Brief description of the component (e.g., "Draft Notice of Motion", "Prepare Statement of Material Facts")
 - offset_days: Days relative to parent due date (negative = before parent deadline)
-  - Example: Parent due 2025-03-15, subtask due 3 days before → offset_days: -3
+  - Example: Parent due 2025-03-15, subtask due 3 days before â†’ offset_days: -3
   - Use -7 for work due one week before, -3 for three days before, -1 for day before
 
 If subtasks are not explicitly indicated or cannot be reasonably inferred, return an empty subtasks array [].
@@ -154,10 +154,10 @@ DEADLINE RULE IDENTIFICATION:
 If the deadline is governed by a statute or court rule, identify it in the applicable_rule field. Use exact citation format:
 
 Common statutory deadlines:
-- "CPLR 3012(a) — Answer to Complaint"
-- "CPLR 3042(a) — Response to Demand for Bill of Particulars"
-- "CPLR 3122(a) — Discovery Response"
-- "CPLR 3212 — MSJ Filing Deadline"
+- "CPLR 3012(a) â€” Answer to Complaint"
+- "CPLR 3042(a) â€” Response to Demand for Bill of Particulars"
+- "CPLR 3122(a) â€” Discovery Response"
+- "CPLR 3212 â€” MSJ Filing Deadline"
 - "IME Scheduling"
 - "IME Report"
 
@@ -839,10 +839,10 @@ If subtasks are not mentioned or implied, return an empty subtasks array [].
 
 DEADLINE RULE IDENTIFICATION:
 If the deadline is governed by a statute or court rule, identify it in the applicable_rule field:
-- "CPLR 3012(a) — Answer to Complaint"
-- "CPLR 3042(a) — Response to Demand for Bill of Particulars"
-- "CPLR 3122(a) — Discovery Response"
-- "CPLR 3212 — MSJ Filing Deadline"
+- "CPLR 3012(a) â€” Answer to Complaint"
+- "CPLR 3042(a) â€” Response to Demand for Bill of Particulars"
+- "CPLR 3122(a) â€” Discovery Response"
+- "CPLR 3212 â€” MSJ Filing Deadline"
 
 Only populate applicable_rule when you have high confidence.
 
@@ -864,7 +864,7 @@ Return your response as JSON with this structure:
       "relative_deadline": {{"value": null, "confidence": 1.0}},
       "priority": {{"value": "P1", "confidence": 0.9}},
       "extraction_rationale": "Responses are due by December 30, 2025",
-      "applicable_rule": "CPLR 3122(a) — Discovery Response",
+      "applicable_rule": "CPLR 3122(a) â€” Discovery Response",
       "subtasks": []
     }}
   ],
@@ -896,7 +896,7 @@ def extract_tasks_with_claude(email_data):
     
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=4096,
             messages=[
                 {"role": "user", "content": prompt}
@@ -1149,7 +1149,7 @@ def determine_status(task, matter_id, has_attachment, attachment_processed=False
         return "Needs Review"
 
 
-def create_notion_task(task, email_data, fingerprint, matter_id, status, llm_model="claude-sonnet-4-20250514"):
+def create_notion_task(task, email_data, fingerprint, matter_id, status, llm_model="claude-sonnet-4-5-20250929"):
     """
     Create task in Notion Tasks (Proposed) database.
     Replicates Module 92: Notion Create Database Item.
@@ -1160,7 +1160,7 @@ def create_notion_task(task, email_data, fingerprint, matter_id, status, llm_mod
         fingerprint: Email fingerprint
         matter_id: Notion page ID of linked matter (or None)
         status: Task status (Proposed, Needs Review, etc.)
-        llm_model: Model that extracted this task (claude-sonnet-4-20250514 or gemini-2.5-pro)
+        llm_model: Model that extracted this task (claude-sonnet-4-5-20250929 or gemini-2.5-pro)
     """
     url = "https://api.notion.com/v1/pages"
     headers = {
@@ -1236,7 +1236,7 @@ def create_notion_task(task, email_data, fingerprint, matter_id, status, llm_mod
     # Add note about attachments if present
     if email_data['has_attachment']:
         current_rationale = properties[NOTION_PROPS["llm_rationale"]]["rich_text"][0]["text"]["content"]
-        attachment_note = f"\n\n⚠️ EMAIL HAS ATTACHMENTS: {', '.join(email_data['attachment_names'])}. Review source email."
+        attachment_note = f"\n\nâš ï¸ EMAIL HAS ATTACHMENTS: {', '.join(email_data['attachment_names'])}. Review source email."
         properties[NOTION_PROPS["llm_rationale"]]["rich_text"][0]["text"]["content"] = current_rationale + attachment_note
     
     data = {
@@ -1257,7 +1257,7 @@ def create_notion_task(task, email_data, fingerprint, matter_id, status, llm_mod
         return None
 
 
-def create_notion_calendar_item(event, email_data, fingerprint, matter_id, status, llm_model="claude-sonnet-4-20250514"):
+def create_notion_calendar_item(event, email_data, fingerprint, matter_id, status, llm_model="claude-sonnet-4-5-20250929"):
     """
     Create calendar item in Notion Calendar Items (Proposed) database.
     
@@ -1267,7 +1267,7 @@ def create_notion_calendar_item(event, email_data, fingerprint, matter_id, statu
         fingerprint: Email fingerprint
         matter_id: Notion page ID of linked matter (or None)
         status: Item status (Proposed, Needs Review, etc.)
-        llm_model: Model that extracted this item (claude-sonnet-4-20250514 or gemini-2.5-pro)
+        llm_model: Model that extracted this item (claude-sonnet-4-5-20250929 or gemini-2.5-pro)
     """
     url = "https://api.notion.com/v1/pages"
     headers = {
@@ -1705,7 +1705,7 @@ def create_section_mapping_entry(matter_id, todoist_section_id, case_name):
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Created section mapping for {case_name}: {matter_id} → section {todoist_section_id}")
+        logger.info(f"Created section mapping for {case_name}: {matter_id} â†’ section {todoist_section_id}")
         return result.get('id')
     except Exception as e:
         logger.error(f"Failed to create section mapping entry: {e}")
@@ -1831,7 +1831,7 @@ def create_mapping_entry(matter_id, todoist_project_id, case_name):
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
-        logger.info(f"Created mapping entry for {case_name}: {matter_id} → {todoist_project_id}")
+        logger.info(f"Created mapping entry for {case_name}: {matter_id} â†’ {todoist_project_id}")
         return result.get('id')
     except Exception as e:
         logger.error(f"Failed to create mapping entry: {e}")
@@ -2536,8 +2536,8 @@ def webhook():
     """
     Main endpoint for email intake.
     Replicates entire Flow 1 logic with dual-model extraction:
-    - Attachments → Gemini 2.5 Pro (native multimodal)
-    - Email body → Claude (text extraction)
+    - Attachments â†’ Gemini 2.5 Pro (native multimodal)
+    - Email body â†’ Claude (text extraction)
     """
     try:
         # Get payload - handle various formats
@@ -2649,9 +2649,9 @@ def webhook():
         
         # Add source_model to Claude tasks
         for task in claude_extraction.get('tasks', []):
-            task['source_model'] = 'claude-sonnet-4-20250514'
+            task['source_model'] = 'claude-sonnet-4-5-20250929'
         for item in claude_extraction.get('calendar_items', []):
-            item['source_model'] = 'claude-sonnet-4-20250514'
+            item['source_model'] = 'claude-sonnet-4-5-20250929'
         
         all_tasks.extend(claude_extraction.get('tasks', []))
         all_calendar_items.extend(claude_extraction.get('calendar_items', []))
@@ -2712,7 +2712,7 @@ def webhook():
         created_tasks = []
         for task in all_tasks:
             # Get source model for this task
-            llm_model = task.get('source_model', 'claude-sonnet-4-20250514')
+            llm_model = task.get('source_model', 'claude-sonnet-4-5-20250929')
             
             status = determine_status(task, matter_id, email_data['has_attachment'], attachment_processed)
             notion_id = create_notion_task(task, email_data, fingerprint, matter_id, status, llm_model)
@@ -2743,7 +2743,7 @@ def webhook():
         
         # Step 9: Handle calendar items (create in Calendar Items database)
         for event in all_calendar_items:
-            llm_model = event.get('source_model', 'claude-sonnet-4-20250514')
+            llm_model = event.get('source_model', 'claude-sonnet-4-5-20250929')
             status = "Proposed" if matter_id else "Needs Review"
             notion_id = create_notion_calendar_item(event, email_data, fingerprint, matter_id, status, llm_model)
             
@@ -2992,7 +2992,7 @@ def promotion_webhook():
                 source="Todoist"
             )
         
-        logger.info(f"Promotion complete: {task_title} → Todoist {todoist_task_id}")
+        logger.info(f"Promotion complete: {task_title} â†’ Todoist {todoist_task_id}")
         
         return jsonify({
             "status": "promoted",
@@ -3239,7 +3239,7 @@ def handle_todoist_item_added(todoist_task_id, task_content, project_id, section
         source="Todoist"
     )
     
-    logger.info(f"Reverse sync complete: {task_content} → Notion {notion_page_id}")
+    logger.info(f"Reverse sync complete: {task_content} â†’ Notion {notion_page_id}")
     
     return jsonify({
         "status": "synced",
@@ -3671,11 +3671,11 @@ def sync_matters():
 def root():
     """Root endpoint with service info."""
     return jsonify({
-        "service": "Anaïs Legal Task Automation",
+        "service": "AnaÃ¯s Legal Task Automation",
         "version": "2.0.0",
         "endpoints": {
             "/webhook": "POST - Flow 1: Email intake",
-            "/promotion-webhook": "POST - Flow 2: Notion → Todoist promotion (auto-creates projects)",
+            "/promotion-webhook": "POST - Flow 2: Notion â†’ Todoist promotion (auto-creates projects)",
             "/todoist-webhook": "POST - Flow 3: Todoist completion sync",
             "/calendar-sync": "POST - Flow 4: Calendar sync (preview)",
             "/digest": "GET/POST - Flow 5: Weekly digest data",
@@ -3912,7 +3912,7 @@ def oauth_callback():
         <html>
         <head><title>Todoist Authorization Complete</title></head>
         <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
-            <h1>✅ Authorization Complete!</h1>
+            <h1>âœ… Authorization Complete!</h1>
             <p>Your Todoist app has been authorized. Webhooks should now be active.</p>
             <p>You can close this window and test by completing a task in Todoist.</p>
             <p><strong>Code received:</strong> {}</p>
